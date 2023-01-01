@@ -6,11 +6,14 @@ from tqdm import tqdm
 import heapq
 from unionfind import UnionFind
 
+
 # TODO import existing graph based on adj matrix or edge list
 def grid(rows, cols):
     g = IncidenceGraph()
+
     def index(r, c):
         return r * cols + c
+
     def reverse_index(index):
         return index // cols, index % cols
 
@@ -25,6 +28,7 @@ def grid(rows, cols):
         if r - 1 >= 0:
             g.put_simplex((index(r, c), index(r - 1, c)), 1)
     return g, index, reverse_index
+
 
 def plane(v, e, d, min_x, max_x, dist_metric, var, connected=True):
     # todo custom seed
@@ -61,7 +65,7 @@ def plane(v, e, d, min_x, max_x, dist_metric, var, connected=True):
         else:
             v_i = random.choice(available)
             _, node_i = g._IncidenceGraph__get((v_i,))
-            i_avail = node_i.non_neighbors(0)
+            i_avail = node_i.non_adjacency_set(0)
             v_j = random.choice(list(i_avail))
             _, node_j = g._IncidenceGraph__get((v_j,))
 
@@ -123,6 +127,7 @@ def astar(graph, i, j, heuristic=None, ver_heur=False):
 
     return None, iters
 
+
 def dijkstra(graph, i):
     pq = []
     heapq.heappush(pq, (0.0, 0, i))
@@ -146,6 +151,7 @@ def dijkstra(graph, i):
 
     return dists, edges
 
+
 def all_pairs_sp(graph):
     dists = []
     edges = []
@@ -154,14 +160,16 @@ def all_pairs_sp(graph):
         edges.append(dijkstra(graph, i)[1])
     return dists, edges
 
+
 def graph_heuristic(graphrep, dist_metric):
     def heuristic(x_i, x, y_i, y):
         return dist_metric(graphrep[x_i], graphrep[y_i])
+
     return heuristic
 
 
 def dist_heuristic(dist_metric):
     def heuristic(x_i, x, y_i, y):
         return dist_metric(x, y)
-    return heuristic
 
+    return heuristic

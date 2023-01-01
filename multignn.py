@@ -31,11 +31,12 @@ class PartialForwardNN(nn.Module):
 
 class MultiGraphLayer(nn.Module):
     # A: (a, n, n) tensor
-        # a: number of adjacency matrices
-        # n x n: adjacency matrix
+    # a: number of adjacency matrices
+    # n x n: adjacency matrix
     # H: (n, d)
     # W: (a, d, d) tensor
-    def __init__(self, transform_func=None, vertex_agg_func=None, graph_agg_func=None, update_func=None, num_vertices=None):
+    def __init__(self, transform_func=None, vertex_agg_func=None, graph_agg_func=None, update_func=None,
+                 num_vertices=None):
         """
         :param transform_func: inputs (n, *) original graph and outputs (n, d) transformed graph
         :param vertex_agg_func: inputs (n, d) graph and (a, n, n) adjacency and outputs
@@ -114,7 +115,8 @@ class MultiGraphLayer(nn.Module):
             elif p == v:
                 self._hasty += p
                 if self._hasty > self.n:
-                    raise ValueError(f'Total number of partial vertices {self._hasty} exceeds number of total vertices {self.n}')
+                    raise ValueError(
+                        f'Total number of partial vertices {self._hasty} exceeds number of total vertices {self.n}')
                 elif self._hasty == self.n:
                     self._hasty = 0
                     return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), True
@@ -131,18 +133,22 @@ class MultiGraphLayer(nn.Module):
             if d2 != d:
                 raise ValueError(f'Graph has {d} embedding dimensions, but past input(s) had {d2}')
             if p2 + p > n:
-                raise ValueError(f'The graph should have {n} vertices, but after this partial update, it will have {p2 + p}')
+                raise ValueError(
+                    f'The graph should have {n} vertices, but after this partial update, it will have {p2 + p}')
 
         partial_vertex_agg = self.v_agg(graph, adjs)
         if len(partial_vertex_agg.shape) != 3:
             raise ValueError(f'Result of vertex aggregation must be a 3D tensor, but got {partial_vertex_agg.shape}')
         a2, p2, d2 = partial_vertex_agg.shape
         if a2 != a:
-            raise ValueError(f'Vertex aggregation function outputted {a2} adjacency matrices, but this model expects {a} based on the input')
+            raise ValueError(
+                f'Vertex aggregation function outputted {a2} adjacency matrices, but this model expects {a} based on the input')
         if p2 != p:
-            raise ValueError(f'Vertex aggregation function outputted {p2} partial vertices, but this model expects {p} based on the input')
+            raise ValueError(
+                f'Vertex aggregation function outputted {p2} partial vertices, but this model expects {p} based on the input')
         if d2 != d:
-            raise ValueError(f'Vertex aggregation function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
+            raise ValueError(
+                f'Vertex aggregation function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
 
         if self._partial is None:
             self._partial = partial_vertex_agg
@@ -161,7 +167,8 @@ class MultiGraphLayer(nn.Module):
         if n2 != self.n:
             raise ValueError(f'Graph aggregation function outputted {n2} vertices, but this model expects {self.n}')
         if d2 != d:
-            raise ValueError(f'Graph aggregation function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
+            raise ValueError(
+                f'Graph aggregation function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
 
         new_graph = self.update(graph, messages)
         if len(new_graph.shape) != 2:
@@ -170,7 +177,8 @@ class MultiGraphLayer(nn.Module):
         if v2 != self.n:
             raise ValueError(f'Update function outputted {v2} vertices, but this model expects {self.n}')
         if d2 != d:
-            raise ValueError(f'Update function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
+            raise ValueError(
+                f'Update function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
         return new_graph, True
 
 
@@ -273,7 +281,7 @@ class SegmentedTransform(nn.Module):
     def forward(self, x):
         y = None
         for i in range(len(self.weights)):
-            output = x[self.offsets[i]:self.offsets[i+1], :] @ self.weights[i]
+            output = x[self.offsets[i]:self.offsets[i + 1], :] @ self.weights[i]
             if self.biases is not None:
                 output += self.biases[i]
 
@@ -284,3 +292,15 @@ class SegmentedTransform(nn.Module):
 
         return self.activate(y)
 
+
+class EmbeddingGenerator(nn.Module):
+    def __init__(self, size, out_features):
+        super().__init__()
+        self.N = size
+        self.d = out_features
+
+        r = math.sqrt(1.0 / out_features)
+        self.W = nn.Parameter(torch.rand((size, out_features)) * -2.0 * r + r)
+
+    def forward(self, *args):
+        return self.W

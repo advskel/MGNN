@@ -73,6 +73,12 @@ class SharedNumpyArray:
     def __iter__(self):
         return iter(self._res)
 
+    def __enter__(self):
+        return self._res
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unlink()
+
     def __getstate__(self):
         state = self.__dict__.copy()
         del state['_shared']
