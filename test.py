@@ -1,25 +1,21 @@
-import gc
 import logging
-import random
 import time
-import multiprocessing
-
 from incidence_graph import IncidenceGraph
-import incidence_mp
+from mp import incidence_mp
 import multignn
 import torch
 import coloredlogs
 from tqdm import tqdm
 import torch.nn as nn
 import graphutils
-import numpy as np
+import multiprocessing
 
 
 def main():
     g = IncidenceGraph()
     g.put_simplex((0, 1))
     g.put_simplex((1, 2, 3))
-    print(g.neighbors(0, -1))
+    print(g.adjacency_matrix(1, True))
 
 
 def gridtest(width, height, rel_dims, partial_size, iters):

@@ -1,10 +1,8 @@
-import time
 from collections import deque
-from queue import Empty
 import numpy as np
-import multiprocessing
-import mp
+from . import utils as mp
 from tqdm import tqdm
+import multiprocessing
 
 
 class IGraphMP:

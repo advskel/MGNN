@@ -1,8 +1,13 @@
 import math
+from typing import Iterable, Optional, Callable, Any, Tuple
 
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+
+_tensor_func = Optional[Callable[[Tensor], Tensor]]
+_two_tensor_func = Optional[Callable[[Tensor, Tensor], Tensor]]
 
 
 class PartialForwardNN(nn.Module):
@@ -13,7 +18,7 @@ class PartialForwardNN(nn.Module):
             self.layers.append(l)
         self._curr_layer = 0
 
-    def forward(self, x, *args):
+    def forward(self, x: Tensor, *args: Any) -> Optional[Tensor]:
         done = False
         curr_layer = self._curr_layer
         while self._curr_layer < len(self.layers) and curr_layer < len(self.layers):
@@ -35,8 +40,8 @@ class MultiGraphLayer(nn.Module):
     # n x n: adjacency matrix
     # H: (n, d)
     # W: (a, d, d) tensor
-    def __init__(self, transform_func=None, vertex_agg_func=None, graph_agg_func=None, update_func=None,
-                 num_vertices=None):
+    def __init__(self, transform_func: _tensor_func = None, vertex_agg_func: _two_tensor_func = None, graph_agg_func: _tensor_func = None, update_func: _two_tensor_func = None,
+                 num_vertices: Optional[int] = None):
         """
         :param transform_func: inputs (n, *) original graph and outputs (n, d) transformed graph
         :param vertex_agg_func: inputs (n, d) graph and (a, n, n) adjacency and outputs
@@ -72,11 +77,11 @@ class MultiGraphLayer(nn.Module):
         self._partial = None  # (a, p, d) tensor
         self._hasty = 0
 
-    def reset_forward(self):
+    def reset_forward(self) -> None:
         self._partial = None
         self._hasty = 0
 
-    def forward(self, x, adjs):
+    def forward(self, x: Tensor, adjs: Tensor) -> Tuple[Optional[Tensor], bool]:
         # TODO batch forward where input is (b, n, *) and adjs is (b, a, n, n)
         """
         :param x: an (n, *) tensor representing the vertex embeddings for a 2D graph
@@ -183,7 +188,10 @@ class MultiGraphLayer(nn.Module):
 
 
 class LinearAggregate(nn.Module):
-    def __init__(self, num_layers, num_features, activation_func=None, use_weights=True, use_bias=True):
+    """
+    Layer that applies a linear transformation to each of :math:`A` matrices in an `A x N x D` tensor and sums them.
+    """
+    def __init__(self, num_layers: int, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
         super().__init__()
         self.a = num_layers
         self.d = num_features
@@ -202,7 +210,7 @@ class LinearAggregate(nn.Module):
         if use_bias:
             self.B = nn.Parameter(torch.rand((self.a, 1, self.d)) * -2.0 * r + r)
 
-    def forward(self, graphs):
+    def forward(self, graphs: Tensor) -> Tensor:
         """
         :param graphs: (a, n, d) tensor representing `num_layers` graphs/messages with `n` vertices
                        represented by embeddings of dimension `num_features`
@@ -219,7 +227,7 @@ class LinearAggregate(nn.Module):
 
 
 class LinearMessageUpdate(nn.Module):
-    def __init__(self, num_features, activation_func=None, use_weights=True, use_bias=True):
+    def __init__(self, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
         super().__init__()
         if activation_func is None:
             activation_func = lambda x: x
@@ -237,13 +245,19 @@ class LinearMessageUpdate(nn.Module):
         if use_bias:
             self.B = nn.Parameter(torch.rand(self.d) * -2.0 * r + r)
 
-    def forward(self, graph, message):
+    def forward(self, graph: Tensor, message: Tensor) -> Tensor:
         """
-        :param graph: (n, d) tensor representing a graph with `n` vertices
-                      each vertex with embedding dimension `num_features`
-        :param message: (n, d) tensor representing messages for all `n` vertices,
-                        each message with embedding dimension `num_features`
-        :return: a new (n, d) tensor representing new graph embeddings
+        Applies a linear transformation to the graph and to the message and sums them.
+
+        Args:
+            graph: (n, d) tensor representing a graph with *n* vertices,
+                   each vertex with embedding dimension *num_features*
+            message: (n, d) tensor representing messages for all *n* vertices,
+                        each message with embedding dimension *num_features*
+
+        Returns:
+            a new (n, d) tensor representing final graph embeddings
+
         """
         if self.use_weights and self.use_bias:
             return self.activate(graph @ self.W1 + message @ self.W2 + self.B)
@@ -256,7 +270,10 @@ class LinearMessageUpdate(nn.Module):
 
 
 class SegmentedTransform(nn.Module):
-    def __init__(self, in_features, out_features, seg_sizes, activation_func=None, use_bias=True):
+    """
+    A layer that applies a different linear transformation to each "chunk" of an input tensor.
+    """
+    def __init__(self, in_features: int, out_features: int, seg_sizes: Iterable[int], activation_func: _tensor_func = None, use_bias: bool = True):
         super().__init__()
         self.offsets = [0]
         for d in seg_sizes:
@@ -278,7 +295,7 @@ class SegmentedTransform(nn.Module):
             for i in range(len(seg_sizes)):
                 self.biases.append(nn.Parameter(torch.rand(out_features) * -2.0 * r + r))
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         y = None
         for i in range(len(self.weights)):
             output = x[self.offsets[i]:self.offsets[i + 1], :] @ self.weights[i]
@@ -294,7 +311,10 @@ class SegmentedTransform(nn.Module):
 
 
 class EmbeddingGenerator(nn.Module):
-    def __init__(self, size, out_features):
+    """
+    A layer that outputs a learnable (n, d) embedding matrix.
+    """
+    def __init__(self, size: int, out_features: int):
         super().__init__()
         self.N = size
         self.d = out_features
@@ -302,5 +322,15 @@ class EmbeddingGenerator(nn.Module):
         r = math.sqrt(1.0 / out_features)
         self.W = nn.Parameter(torch.rand((size, out_features)) * -2.0 * r + r)
 
-    def forward(self, *args):
+    def forward(self, *args: Any) -> Tensor:
+        """
+        Outputs an (n, d) learnable embedding matrix.
+
+        Args:
+            *args: Dummy/unused parameters that do not affect the output.
+
+        Returns:
+            an (n, d) embedding matrix.
+
+        """
         return self.W

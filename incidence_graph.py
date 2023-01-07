@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import collections.abc
 import itertools
-from collections.abc import Iterable, Iterator, Sized, Container
+from collections.abc import Iterable, Iterator, Collection
 from collections import deque
 from typing import List, Tuple, Set, Dict, Optional, Any, Callable  # TODO use built-in list, tuple etc.
 import numpy as np
 from numpy.typing import NDArray
 
 
-class IncidenceGraph(Sized, Container, Iterable):
+class IncidenceGraph(Collection):
     class _IncidenceNode:
         def __init__(self, vertices: Tuple[int, ...], data: Any, index: int, graph: IncidenceGraph):
             self.vertices: Tuple[int, ...] = vertices
@@ -111,7 +112,7 @@ class IncidenceGraph(Sized, Container, Iterable):
                 adj.discard(self.index)
             return adj
 
-        def apply_data_gen(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
+        def apply_data_gen(self, data_gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
             if data_gen is None:
                 return
             data = []
@@ -119,7 +120,7 @@ class IncidenceGraph(Sized, Container, Iterable):
                 data.append(self.graph._dimensions[self.d - 1][i].data)
             self.data = data_gen(data)
 
-        def generalize(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
+        def generalize(self, data_gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
             if self.d == 0:
                 return
 
@@ -210,7 +211,7 @@ class IncidenceGraph(Sized, Container, Iterable):
     # TODO neighbor sets for points d connections away
 
     def put_simplex(self, vertices: int | Iterable[int], data: Any = None,
-                    data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
+                    data_gen: Optional[Callable[[Collection[Any]], Any]] = None) -> None:
         vertices = IncidenceGraph.__type_check(vertices)
         d = len(vertices) - 1
         index, node = self.__get(vertices)
@@ -258,7 +259,7 @@ class IncidenceGraph(Sized, Container, Iterable):
             self.remove_relation(vb, va)
 
     def put_incidence_relation(self, vertex_list: Iterable[int | Iterable[int]], data: Any = None,
-                               data_gen: Optional[Callable[[List[Any]], Any]] = None):
+                               data_gen: Optional[Callable[[Collection[Any]], Any]] = None):
         vertices = set()
         indices = set()
         for vs in vertex_list:
@@ -346,6 +347,25 @@ class IncidenceGraph(Sized, Container, Iterable):
 
     def partial_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
                          partial_size: Optional[int] = None) -> Callable[[], NDArray[np.float32]]:
+        """
+        Returns a function that returns partial adjacency matrices of this graph, like an iterator,
+        for the given distances and dimensions.
+
+        Args:
+            neighbor_dists: Distances of neighbor relations to encode as adjacency matrices. For example, if given [0, 1, 2],
+                the first adjacency matrix will be the identity matrix, the second one will have all neighbor
+                relations, and the third one will have all neighbor relations of distance 2.
+            rel_dims: Relative dimensions of incidence relations to encode as adjacency matrices. For example, if given
+                [-1, 0, 1, 2], the first adjacency matrix will have lower incidence relations, the second one will be the
+                identity matrix, the third one will have upper incidence relations, and the fourth one will have
+                upper incidence relations that are 2 dimensions away.
+            partial_size: The size `p` of the (a, p, n) matrices to return. If `None`, the full matrices are returned.
+
+        Returns:
+            A function that returns the adjacency matrices as an (a, p, n) array, where `a` is the number of adjacency
+            matrices, `p` is the partial size, and `n` is the number of nodes in the graph. Raises `StopIteration` when
+            all matrices have been returned.
+        """
         flattened = self.__flatten()
         A, N = 0, len(self)
 
@@ -382,10 +402,10 @@ class IncidenceGraph(Sized, Container, Iterable):
             adj = np.zeros((A, P, N), dtype=np.float32)
             for n, node in enumerate(flattened[i:i + P]):
                 for j, d in node.neighbor_relations(neighbor_dists):
-                    for k in reverse_rel_dims[d]:
+                    for k in reverse_neighbors[d]:
                         adj[k, n, j] = 1.0
                 for j, d in node.incidence_relations(rel_dims):
-                    for k in reverse_neighbors[d]:
+                    for k in reverse_rel_dims[d]:
                         adj[k, n, j] = 1.0
 
             return adj
@@ -393,40 +413,67 @@ class IncidenceGraph(Sized, Container, Iterable):
         return next_partial
 
     def shape(self) -> List[int]:
+        """
+        Returns the shape of the incidence graph as a list of integers.
+
+        Returns:
+            The number of nodes in each dimension
+
+        """
         return [len(d) for d in self._dimensions]
 
-    def generalize(self, dimension: Optional[int] = None,
-                   data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
-        # data can be function that generates data based on existing data from lower nodes
-        if dimension is None:
-            prev_size = len(self._dimensions)
-            for d in range(1, len(self._dimensions)):
-                for node in self._dimensions[d]:
-                    node.generalize(data_gen)
-            while len(self._dimensions) != prev_size:
-                prev_size = len(self._dimensions)
-                for node in self._dimensions[-1]:
-                    node.generalize(data_gen)
+    def generalize(self, dim: Optional[int | Iterable[int]] = None,
+                   data_gen: Optional[Callable[[Collection[Any]], Any]] = None) -> None:
+        """"Completes" higher-dimensional simplexes if their lower-dimensional connections already exist.
 
-        elif dimension >= len(self._dimensions) or dimension < 0:
-            raise IndexError(f'Invalid dimension {dimension}')
+        For example, in a graph with vertices 0, 1, 2, and 3, if there exists edges (0, 1), (1, 2), (0, 2), and (1, 3), then
+        a face (0, 1, 2) will be created. The face (0, 1, 3), for example, will not be created because the edge (0, 3) does
+        not exist.
+
+        This method is useful for generating higher-dimensional graphs from lower-dimensional ones.
+
+        Args:
+            dim: The dimension or dimensions to generalize. If None, all dimensions will be generalized, including
+                newly-created dimensions from this very process.
+            data_gen: An optional function that generates the data for a new node from the data of its
+                     lower-dimensional neighbors. If None, new nodes will have no data (None).
+        """
+        if dim is None:
+            d = 1
+            while d < len(self._dimensions):
+                self.generalize(d, data_gen)
+                d += 1
+        elif isinstance(dim, int):
+            if dim >= len(self._dimensions) or dim < 0:
+                raise IndexError(f'Invalid dimension {dim}')
+            else:
+                for node in self._dimensions[dim]:
+                    node.generalize(data_gen)
+        elif isinstance(dim, Iterable):
+            for d in dim:
+                self.generalize(d, data_gen)
         else:
-            for node in self._dimensions[dimension]:
-                node.generalize(data_gen)
+            raise TypeError(f'Invalid type {type(dim)} for `dim`')
 
     def size(self, dim: Optional[int] = None) -> int:
-        """
-        Returns the number of nodes in a given dimension in the graph.
+        """Returns the number of nodes in a given dimension in the graph.
 
-        Args: dim (int or None): The dimension from which to get the size. If None, returns the total number of nodes
+        Args:
+            dim (int or None): The dimension from which to get the size. If None, returns the total number of nodes
                                  in the graph (though this is equivalent to using `len` on the graph).
 
-        Returns (int): The number of nodes in the given dimension, or the total number of nodes in the graph if no
-                       dimension is given.
+        Returns:
+            int. The number of nodes in the given dimension, or the total number of nodes in the graph if no dimension is
+            given.
 
+        Raises:
+            IndexError: If the given dimension is invalid.
+            TypeError: If the given dimension is not an integer.
         """
         if dim is None:
             return len(self)
+        elif not isinstance(dim, int):
+            raise TypeError(f'Invalid type {type(dim)} for `dim`')
         if dim < 0:
             raise IndexError(f'Invalid dimension {dim}')
         elif dim >= len(self._dimensions):
@@ -435,7 +482,7 @@ class IncidenceGraph(Sized, Container, Iterable):
         return len(self._dimensions[dim])
 
     def __new_node(self, vertices: Tuple[int, ...], data: Any, index: int) -> IncidenceGraph._IncidenceNode:
-        # can overload
+        # separate method for overloading
         return IncidenceGraph._IncidenceNode(vertices, data, index, self)
 
     @staticmethod
@@ -530,7 +577,7 @@ class IncidenceGraph(Sized, Container, Iterable):
             for j in node.upper:
                 self.__remove_node(d + 1, j, recursive)
 
-    def __make_simplex(self, index: int, d: int, data: Any, gen: Optional[Callable[[List[Any]], Any]]) -> None:
+    def __make_simplex(self, index: int, d: int, data: Any, gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
         # turn existing node with dimension d and index into simplex
         node = self._dimensions[d][index]
         if d == 0:
