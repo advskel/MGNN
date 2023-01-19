@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Optional, Callable, Any, Tuple
+from typing import Optional, Callable, Any, Tuple, Collection
 
 import torch
 from torch import Tensor
@@ -273,7 +273,7 @@ class SegmentedTransform(nn.Module):
     """
     A layer that applies a different linear transformation to each "chunk" of an input tensor.
     """
-    def __init__(self, in_features: int, out_features: int, seg_sizes: Iterable[int], activation_func: _tensor_func = None, use_bias: bool = True):
+    def __init__(self, in_features: int, out_features: int, seg_sizes: Collection[int], activation_func: _tensor_func = None, use_bias: bool = True):
         super().__init__()
         self.offsets = [0]
         for d in seg_sizes:
