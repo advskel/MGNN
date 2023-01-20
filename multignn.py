@@ -11,6 +11,9 @@ _two_tensor_func = Optional[Callable[[Tensor, Tensor], Tensor]]
 
 
 class PartialForwardNN(nn.Module):
+    """
+    A neural network container that supports partial forwarding and hasty partial forwarding.
+    """
     def __init__(self, *args):
         super().__init__()
         self.layers = nn.ModuleList()
@@ -35,6 +38,16 @@ class PartialForwardNN(nn.Module):
 
 
 class MultiGraphLayer(nn.Module):
+    """
+    A Multi-graph layer is a message-passing layer for higher-dimensional graphs that consists of four steps:
+    1. (Optional) Transform some initial input into a graph embedding
+    2. Generate messages from each adjacency matrix (which supports partial adjacency matrices)
+    3. Combine the messages into a single message
+    4. Update the original graph embedding with the message to create a new graph embedding
+
+    The user is expected to provide all functions listed above, though this module provides defaults (that do not
+    involve learning).
+    """
     # A: (a, n, n) tensor
     # a: number of adjacency matrices
     # n x n: adjacency matrix
@@ -43,15 +56,20 @@ class MultiGraphLayer(nn.Module):
     def __init__(self, transform_func: _tensor_func = None, vertex_agg_func: _two_tensor_func = None, graph_agg_func: _tensor_func = None, update_func: _two_tensor_func = None,
                  num_vertices: Optional[int] = None):
         """
-        :param transform_func: inputs (n, *) original graph and outputs (n, d) transformed graph
-        :param vertex_agg_func: inputs (n, d) graph and (a, n, n) adjacency and outputs
-                             (a, n, d) tensor of messages, one message per adjacency matrix
-                             if doing partial, then (n, d) (a, p, n) -> (a, p, d)
-        :param graph_agg_func: inputs (a, n, d) tensor and outputs (n, d) tensor,
-                            goal is to aggregate all `a` graphs then activate;
-        :param update_func: inputs two (n, d) tensors and outputs (n, d) tensor,
-                            goal is to aggregate both tensors then activate;
-                            no partial here, always update full graphs once partial updates are done
+        Args:
+            transform_func: Inputs an (n, *) original graph and outputs an (n, d) transformed graph. If None, then this
+                layer is skipped.
+            vertex_agg_func: Inputs an (n, d) graph and an (a, n, n) adjacency tensor and outputs a (a, n, d) tensor of
+                messages, one message per adjacency matrix. This function should also support partial updates with
+                 the shapes (n, d) (a, p, n) -> (a, p, d). If None, then the adjacency tensor is multiplied (matrix
+                 multiplication) to the graph tensor.
+            graph_agg_func: Inputs an (a, n, d) tensor and outputs an (n, d) tensor, in which the goal is to aggregate
+                all `a` messages then activate. If None, then the `a` messages are summed and activated with ReLU.
+            update_func: Inputs two (n, d) tensors and outputs an (n, d) tensor, in which the goal is to aggregate both
+                tensors then activate. Note that the updates are always performed with full inputs, not partial ones.
+                If None, then the two tensors are averaged and activated with ReLU.
+            num_vertices: The size `n` to expect from all inputs. If None, then a standard input dimension will not be
+                enforced.
         """
         super().__init__()
         if transform_func is None:
@@ -82,15 +100,17 @@ class MultiGraphLayer(nn.Module):
         self._hasty = 0
 
     def forward(self, x: Tensor, adjs: Tensor) -> Tuple[Optional[Tensor], bool]:
-        # TODO batch forward where input is (b, n, *) and adjs is (b, a, n, n)
+        # TODO batch forward? where input is (b, n, *) and adjs is (b, a, n, n)
         """
-        :param x: an (n, *) tensor representing the vertex embeddings for a 2D graph
+        Args:
+            x: an (n, *) tensor representing the vertex embeddings for a 2D graph
                       with `n` vertices
-        :param adjs: an (a, n, n) tensor representing `a` (n, n) adjacency lists:
+            adjs: an (a, n, n) or partial (a, p, n) tensor representing `a` (n, n) adjacency lists:
                      a[i, j] = 1 if there is an edge from i to j (specifically, if j contributes a message to i),
                      a[i, j] = 0 otherwise
-                     if partial, then (a, p, n) tensor
-        :return: a new (n, d) tensor representing new vertex embeddings for input graph
+
+        Returns:
+            a new (n, d) tensor representing new vertex embeddings for input graph
         """
         graph = self.transform(x)
         if graph.shape[0] != x.shape[0]:
@@ -189,7 +209,7 @@ class MultiGraphLayer(nn.Module):
 
 class LinearAggregate(nn.Module):
     """
-    Layer that applies a linear transformation to each of :math:`A` matrices in an `A x N x D` tensor and sums them.
+    Layer that applies a linear transformation to each of `a` matrices in an (a, n, d) tensor and sums them.
     """
     def __init__(self, num_layers: int, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
         super().__init__()
@@ -212,9 +232,13 @@ class LinearAggregate(nn.Module):
 
     def forward(self, graphs: Tensor) -> Tensor:
         """
-        :param graphs: (a, n, d) tensor representing `num_layers` graphs/messages with `n` vertices
+        Args:
+            graphs: (a, n, d) tensor representing `num_layers` graphs/messages with `n` vertices
                        represented by embeddings of dimension `num_features`
-        :return: (n, d) tensor representing combined message from all layers
+
+        Returns:
+            (n, d) tensor representing combined message from all layers
+
         """
         if self.use_weights and self.use_bias:
             return self.activate(torch.sum(graphs @ self.W + self.B, dim=0))
@@ -227,6 +251,9 @@ class LinearAggregate(nn.Module):
 
 
 class LinearMessageUpdate(nn.Module):
+    """
+    A layer that combines a graph embedding with a message by applying a linear transformation and summing them.
+    """
     def __init__(self, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
         super().__init__()
         if activation_func is None:
@@ -256,7 +283,7 @@ class LinearMessageUpdate(nn.Module):
                         each message with embedding dimension *num_features*
 
         Returns:
-            a new (n, d) tensor representing final graph embeddings
+            A new (n, d) tensor representing final graph embeddings
 
         """
         if self.use_weights and self.use_bias:
@@ -267,48 +294,6 @@ class LinearMessageUpdate(nn.Module):
             return self.activate(graph + message + self.B)
         else:
             return self.activate(graph + message)
-
-
-class SegmentedTransform(nn.Module):
-    """
-    A layer that applies a different linear transformation to each "chunk" of an input tensor.
-    """
-    def __init__(self, in_features: int, out_features: int, seg_sizes: Collection[int], activation_func: _tensor_func = None, use_bias: bool = True):
-        super().__init__()
-        self.offsets = [0]
-        for d in seg_sizes:
-            self.offsets.append(self.offsets[-1] + d)
-
-        if activation_func is None:
-            activation_func = lambda x: x
-        self.activate = activation_func
-
-        r = math.sqrt(1.0 / in_features)
-        self.weights = nn.ParameterList()
-        for i in range(len(seg_sizes)):
-            self.weights.append(nn.Parameter(torch.rand((in_features, out_features)) * -2.0 * r + r))
-
-        self.biases = None
-        if use_bias:
-            r = math.sqrt(1.0 / out_features)
-            self.biases = nn.ParameterList()
-            for i in range(len(seg_sizes)):
-                self.biases.append(nn.Parameter(torch.rand(out_features) * -2.0 * r + r))
-
-    def forward(self, x: Tensor) -> Tensor:
-        y = None
-        for i in range(len(self.weights)):
-            output = x[self.offsets[i]:self.offsets[i + 1], :] @ self.weights[i]
-            if self.biases is not None:
-                output += self.biases[i]
-
-            if i == 0:
-                y = output
-            else:
-                y = torch.cat((y, output), dim=0)
-
-        return self.activate(y)
-
 
 class EmbeddingGenerator(nn.Module):
     """
