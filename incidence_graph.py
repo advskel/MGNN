@@ -113,7 +113,7 @@ class IncidenceGraph(Collection):
                 adj.discard(self.index)
             return adj
 
-        def apply_data_gen(self, data_gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
+        def apply_data_gen(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
             if data_gen is None:
                 return
             data = []
@@ -121,7 +121,7 @@ class IncidenceGraph(Collection):
                 data.append(self.graph._dimensions[self.d - 1][i].data)
             self.data = data_gen(data)
 
-        def generalize(self, data_gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
+        def generalize(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
             if self.d == 0:
                 return
 
@@ -212,7 +212,7 @@ class IncidenceGraph(Collection):
     # TODO neighbor sets for points d connections away
 
     def put_simplex(self, vertices: int | Iterable[int], data: Any = None,
-                    data_gen: Optional[Callable[[Collection[Any]], Any]] = None) -> None:
+                    data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
         """Adds a simplex (node) to the graph with the given vertices and data, or updates an existing one with the
         provided data.
 
@@ -317,7 +317,7 @@ class IncidenceGraph(Collection):
             self.remove_relation(vb, va)
 
     def put_incidence_relation(self, vertex_list: Iterable[int | Iterable[int]], data: Any = None,
-                               data_gen: Optional[Callable[[Collection[Any]], Any]] = None) -> None:
+                               data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
         """Creates a higher-dimensional node as a connection of a list of (existing) lower-dimensional nodes with the
         same dimension. In other words, creates a non-simplex node.
 
@@ -647,7 +647,7 @@ class IncidenceGraph(Collection):
         return [len(d) for d in self._dimensions]
 
     def generalize(self, dim: Optional[int | Iterable[int]] = None,
-                   data_gen: Optional[Callable[[Collection[Any]], Any]] = None) -> None:
+                   data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
         """"Completes" higher-dimensional simplexes if their lower-dimensional connections already exist.
 
         For example, in a graph with vertices 0, 1, 2, and 3, if there exists edges (0, 1), (1, 2), (0, 2), and (1, 3),

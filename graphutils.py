@@ -1,4 +1,5 @@
 import random
+from typing import Tuple, Callable, List, Any, Optional
 
 from incidence_graph import IncidenceGraph
 import numpy as np
@@ -8,7 +9,19 @@ from unionfind import UnionFind
 
 
 # TODO import existing graph based on adj matrix or edge list
-def grid(rows, cols):
+def grid(rows: int, cols: int) -> Tuple[IncidenceGraph, Callable[[int, int], int], Callable[[int], Tuple[int, int]]]:
+    # TODO create option to connect diagonally
+    """
+    Generates a grid graph with the given number of rows and columns.
+
+    Args:
+        rows: number of rows
+        cols: number of columns
+
+    Returns:
+        An incidence graph representing the grid and two utility functions: the first maps (integer) coordinates to
+        vertex indices, and the second maps vertex indices to coordinates.
+    """
     g = IncidenceGraph()
 
     def index(r, c):
@@ -20,19 +33,44 @@ def grid(rows, cols):
     for v in tqdm(range(rows * cols), desc='Generating grid'):
         r, c = reverse_index(v)
         if c + 1 < cols:
-            g.put_simplex((index(r, c), index(r, c + 1)), 1)
+            g.put_simplex((index(r, c), index(r, c + 1)), data=1)
         if r + 1 < rows:
-            g.put_simplex((index(r, c), index(r + 1, c)), 1)
+            g.put_simplex((index(r, c), index(r + 1, c)), data=1)
         if c - 1 >= 0:
-            g.put_simplex((index(r, c), index(r, c - 1)), 1)
+            g.put_simplex((index(r, c), index(r, c - 1)), data=1)
         if r - 1 >= 0:
-            g.put_simplex((index(r, c), index(r - 1, c)), 1)
+            g.put_simplex((index(r, c), index(r - 1, c)), data=1)
     return g, index, reverse_index
 
 
-def plane(v, e, d, min_x, max_x, dist_metric, var, connected=True):
+def plane(v: int, e: int, d: int, min_x: int | float, max_x: int | float,
+          dist_metric: Callable[[Any, Any], int | float], var: float=0.0, connected: bool=True):
+    """
+    Generates a random graph on an R^d plane, in which the edge lengths between two vertices must be at least the
+    distance between them, plus some positive random value drawn from a normal distribution. The graph contains no
+    self-loops, no repeated connections, and is undirected.
+
+    Args:
+        v: The number of vertices to generate.
+        e: The number of edges to generate.
+        d: The integer dimension of the vertex coordinates.
+        min_x: The minimum coordinate value.
+        max_x: The maximum coordinate value.
+        dist_metric: A function that takes as input two d-dimensional vectors and returns the distance between them.
+        var: A positive float value. Each edge length will be at least the distance between two vertices, plus a
+            positive random value drawn from a normal distribution with mean 0 and standard deviation var * dist, where
+            `dist` is the distance between the vertices. Therefore, `var` is a proportion of the distance between the
+            vertices, not directly the standard deviation.
+        connected: Whether to ensure that the graph is connected.
+
+    Returns:
+        An incidence graph representing the generated graph.
+
+    Raises:
+        ValueError: If there are too many requested edges, or if not enough edges are requested to ensure connectivity
+            (if `connected` is True).
+    """
     # todo custom seed
-    # default no self loops, no multiple connections, undirected
 
     if e > v * (v - 1) / 2:
         raise ValueError(f'Too many edges, max is {v * (v - 1) / 2} for {v} vertices')
@@ -79,9 +117,33 @@ def plane(v, e, d, min_x, max_x, dist_metric, var, connected=True):
     return g
 
 
-def astar(graph, i, j, heuristic=None, ver_heur=False):
+def astar(graph: IncidenceGraph, i: int, j: int,
+          heuristic: Optional[Callable[[int, int, Any, Any], int | float]]=None,
+          ver_heur: bool=False) -> Tuple[Optional[float], int]:
+    """
+    Performs A* shortest paths search on a graph between two vertices.
+    Args:
+        graph: An incidence graph.
+        i: Index of the source vertex.
+        j: Index of the destination vertex.
+        heuristic: A heuristic function that takes as input the indices of two vertices and their data values and
+            returns an estimate of the distance between them. The heuristic must be symmetric: h_ij = h_ji.
+
+            If None, then the heuristic will always be 0.
+        ver_heur: Whether to verify the heuristic function. If True, then an error will be raised whenever the A*
+            algorithm encounters discrepancies in its distance estimates (i.e., if the heuristic function is either
+            inconsistent or inadmissible).
+
+    Returns:
+        A tuple of two values. The first value is the shortest path distance from vertex i to vertex j, or None if no
+        path is found. The second value is the number of nodes expanded by the A* algorithm (a.k.a. the number of loop
+        iterations), useful for benchmarking/ranking tests.
+
+    Raises:
+        ValueError: If the heuristic function is inconsistent or inadmissible (only if ver_heur is True).
+    """
     if heuristic is None:
-        heuristic = lambda x_i, x, y_i, y: 0.0
+        heuristic = lambda x_i, y_i, x, y: 0.0
 
     pq = []
     heapq.heappush(pq, (0.0, 0.0, i))
@@ -128,7 +190,20 @@ def astar(graph, i, j, heuristic=None, ver_heur=False):
     return None, iters
 
 
-def dijkstra(graph, i):
+def dijkstra_sp(graph: IncidenceGraph, i: int) -> Tuple[List[float], List[int]]:
+    """
+    Finds the shortest path from the given vertex to all other vertices in a graph.
+
+    Args:
+        graph: An incidence graph.
+        i: The index of the vertex to start from.
+
+    Returns:
+        A tuple of two lists. The first list contains the shortest path distances from the origin vertex: dist[j] is the
+        shortest path distance from vertex i to vertex j, or -1 if no path is found. The second list contains the
+        number of edges in the shortest path from the origin: edges[j] is the minimum number of edges in the shortest
+        path from vertex i to vertex j (-1 if no path is found).
+    """
     pq = []
     heapq.heappush(pq, (0.0, 0, i))
     dists = [-1] * graph.size(0)
@@ -136,6 +211,8 @@ def dijkstra(graph, i):
     while len(pq) > 0:
         dist, e, v = heapq.heappop(pq)
         if dists[v] != -1:
+            if dist == dists[v]:
+                edges[v] = min(edges[v], e)
             continue
         dists[v] = dist
         edges[v] = e
@@ -152,24 +229,58 @@ def dijkstra(graph, i):
     return dists, edges
 
 
-def all_pairs_sp(graph):
+def all_pairs_sp(graph: IncidenceGraph) -> Tuple[List[List[float]], List[List[int]]]:
+    """
+    Performs all-pairs shortest paths on a graph.
+
+    Args:
+        graph: An incidence graph.
+
+    Returns:
+        A tuple of two lists. The first list contains the shortest path distances between all pairs of vertices:
+        dists[i][j] is the shortest path distance from vertex i to vertex j. The second list contains the number of
+        edges in the shortest path between all pairs of vertices: edges[i][j] is the minimum number of edges in the
+        shortest path from vertex i to vertex j. Both values are -1 if no path is found between i and j.
+    """
     dists = []
     edges = []
     for i in range(graph.size(0)):
-        dists.append(dijkstra(graph, i)[0])
-        edges.append(dijkstra(graph, i)[1])
+        dists.append(dijkstra_sp(graph, i)[0])
+        edges.append(dijkstra_sp(graph, i)[1])
     return dists, edges
 
 
-def graph_heuristic(graphrep, dist_metric):
-    def heuristic(x_i, x, y_i, y):
+def graph_heuristic(graphrep: IncidenceGraph, dist_metric: Callable[[Any, Any], int | float]) -> Callable[[int, int, Any, Any], int | float]:
+    """
+    Creates a heuristic function for A* shortest paths search on a graph from a graph representation and a distance
+    metric.
+
+    Args:
+        graphrep: An incidence graph.
+        dist_metric: A distance metric that takes as input two vertex data values and returns the distance between them.
+
+    Returns:
+        A heuristic function that takes as input the indices of two vertices and their data values and returns the
+        distance between the two vertices in the incidence graph based on the provided distance metric.
+    """
+    def heuristic(x_i, y_i, x, y):
         return dist_metric(graphrep[x_i], graphrep[y_i])
 
     return heuristic
 
 
-def dist_heuristic(dist_metric):
-    def heuristic(x_i, x, y_i, y):
+def dist_heuristic(dist_metric: Callable[[Any, Any], int | float]) -> Callable[[int, int, Any, Any], int | float]:
+    """
+    Creates a heuristic function for A* shortest paths search from a distance metric.
+
+    Args:
+        dist_metric: A distance metric that takes as input two vertex data values and returns the distance between them.
+
+    Returns:
+        A heuristic function that takes as input the indices of two vertices and their data values and returns the
+        distance between the two vertices based on the provided distance metric.
+    """
+    def heuristic(x_i, y_i, x, y):
         return dist_metric(x, y)
 
     return heuristic

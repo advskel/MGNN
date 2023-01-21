@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Callable, Any, Tuple, Collection
+from typing import Optional, Callable, Any, Tuple
 
 import torch
 from torch import Tensor
