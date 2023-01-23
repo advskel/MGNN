@@ -12,23 +12,30 @@ from numpy.typing import NDArray
 # TODO: read/write graph files
 class IncidenceGraph(Collection):
     class _IncidenceNode:
+        # Used to store the data for a node in an IncidenceGraph. This class should be hidden from the user.
+
         def __init__(self, vertices: Tuple[int, ...], data: Any, index: int, graph: IncidenceGraph):
-            self.vertices: Tuple[int, ...] = vertices
+            self.vertices: Tuple[int, ...] = vertices  # the zero-dimensional vertices that make up the node
             self.d: int = len(vertices) - 1
             self.upper: Set[int] = set()  # list of indices of upper dimension connections
             self.lower: Set[int] = set()  # list of indices of lower dimension neighbors
-            self.index: int = index
+            self.index: int = index  # the index of the node in the IncidenceGraph
             self.graph: IncidenceGraph = graph
             self.data: Any = data
             self.is_simplex: bool = False
 
         def get_total_index(self) -> int:
+            # returns the absolute index of this node in the entire incidence graph
+
             offset = 0
             for i in range(self.d):
                 offset += len(self.graph._dimensions[i])
             return offset + self.index
 
         def neighbor_relations(self, dist: int | Iterable[int] = 1) -> Iterable[Tuple[int, int]]:
+            # returns indices (with distance) of all neighbors with given distance(s)
+            # neighbors are nodes in the same dimension as the current one
+
             if isinstance(dist, int):
                 dist = set().add(dist)
             else:
@@ -67,6 +74,9 @@ class IncidenceGraph(Collection):
                             bfs.append((i, dim - 1, d))
 
         def incidence_relations(self, rel_dim: int | Iterable[int]) -> Iterable[Tuple[int, int]]:
+            # returns all indices (with distance) of nodes that are rel_dim dimensions away from the current one
+            # a positive rel_dim means a higher dimension, a negative one means a lower dimension
+
             if isinstance(rel_dim, int):
                 rel_dim = set().add(rel_dim)
             else:
@@ -104,16 +114,27 @@ class IncidenceGraph(Collection):
         # TODO generalize with some probability (so not all connections)
 
         def non_adjacency_set(self, rel_dim: int, include_self: bool = False) -> Set[int]:
+            # returns all indices of nodes that are NOT connected to the current one in the incidence graph
+            # if rel_dim is 0, then it returns all nodes that are not neighbors
+
             if self.d + rel_dim < 0 or self.d + rel_dim >= len(self.graph._dimensions):
                 return set()
 
             adj = set(range(len(self.graph._dimensions[self.d + rel_dim])))
-            adj.difference_update(self.incidence_relations(rel_dim))
-            if rel_dim == 0 and not include_self:
-                adj.discard(self.index)
+
+            if rel_dim == 0:
+                adj.difference_update(self.neighbor_relations())
+                if not include_self:
+                    adj.discard(self.index)
+            else:
+                adj.difference_update(self.incidence_relations(rel_dim))
+
             return adj
 
         def apply_data_gen(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
+            # applies a data generator function to this node
+            # it takes a list of data from the lower dimension nodes and returns the data for this node
+
             if data_gen is None:
                 return
             data = []
@@ -122,6 +143,8 @@ class IncidenceGraph(Collection):
             self.data = data_gen(data)
 
         def generalize(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
+            # generalizes this node (see generalize function in IncidenceGraph)
+
             if self.d == 0:
                 return
 
@@ -149,6 +172,7 @@ class IncidenceGraph(Collection):
                     self.graph.put_simplex(self.vertices + (vertex,), data_gen=data_gen)
 
         def remove_self(self) -> None:
+            # removes this node from the parent incidence graph
             self.unset_simplex()
             for i in self.upper:
                 self.graph._dimensions[self.d + 1][i].lower.discard(self.index)
@@ -156,6 +180,7 @@ class IncidenceGraph(Collection):
                 self.graph._dimensions[self.d - 1][i].upper.discard(self.index)
 
         def unset_simplex(self) -> None:
+            # marks this node and all upper-dimensional connections as not a simplex
             if not self.is_simplex:
                 return
             self.is_simplex = False
@@ -208,8 +233,6 @@ class IncidenceGraph(Collection):
         self._dimensions: List[
             List[IncidenceGraph._IncidenceNode]] = []  # dimensions[d] stores list of nodes of dimension d
         self._dimensions.append([])
-
-    # TODO neighbor sets for points d connections away
 
     def put_simplex(self, vertices: int | Iterable[int], data: Any = None,
                     data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
@@ -515,9 +538,9 @@ class IncidenceGraph(Collection):
             rel: The distance or number of dimensions away in the relation.
             incidence: Whether to encode incidence (True) or neighbor (False) relations.
 
-        Returns: An (n, n) adjacency matrix, where `n` is the number of nodes.
+        Returns: A (1, n, n) adjacency matrix, where `n` is the number of nodes. To remove the first dimension, use
+            numpy's squeeze() function.
         """
-        # TODO remove 1st dimension
         return self.partial_matrix(rel, incidence)()
 
     def partial_matrix(self, rel: int, incidence: bool = True, partial_size: Optional[int] = None) -> NDArray[
@@ -531,13 +554,13 @@ class IncidenceGraph(Collection):
             partial_size: The size `p` of the (a, p, n) matrices to return. If `None`, the full matrices are returned.
 
         Returns:
-            A function that returns a (p, n) partial matrix when invoked, where `p` is the partial size and `n` is
-            the number of nodes in the graph. hen all partial matrices have been returned.
+            A function that returns a (1, p, n) partial matrix when invoked, where `p` is the partial size and `n` is
+            the number of nodes in the graph. To remove the first dimension, use numpy's squeeze() function.
 
         Raises:
             ValueError: If `partial_size` is not `None` and not a positive integer.
+            StopIteration: Once all partial matrices have been returned.
         """
-        # TODO remove 1st dimension
         if incidence:
             return self.partial_matrices([], [rel], partial_size)
         else:
