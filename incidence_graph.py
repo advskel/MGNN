@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import collections.abc
 import itertools
 from collections.abc import Iterable, Iterator, Collection
 from collections import deque
