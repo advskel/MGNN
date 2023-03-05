@@ -3,12 +3,13 @@ from __future__ import annotations
 import itertools
 from collections.abc import Iterable, Iterator, Collection
 from collections import deque
-from typing import List, Tuple, Set, Dict, Optional, Any, Callable  # TODO use built-in list, tuple etc.
+from typing import List, Tuple, Set, Dict, Optional, Any, Callable, Sequence  # TODO use built-in list, tuple etc.
 import numpy as np
 from numpy.typing import NDArray
 
 
 # TODO: read/write graph files
+# TODO: import from networkx
 class IncidenceGraph(Collection):
     class _IncidenceNode:
         # Used to store the data for a node in an IncidenceGraph. This class should be hidden from the user.
@@ -21,7 +22,13 @@ class IncidenceGraph(Collection):
             self.index: int = index  # the index of the node in the IncidenceGraph
             self.graph: IncidenceGraph = graph
             self.data: Any = data
-            self.is_simplex: bool = False
+            self.is_simplex: bool = False  # if current node and ALL lower dim nodes are simplexes
+
+            # a binary number representing inbound/outbound connections (for directed node) on lower dim
+            # a 1 on ith position means the lower-dimensional node that does NOT include vertex i is connected
+            # so if we have face (1, 2, 3) connecting (1, 3) and (2, 3), then the binary number is 110
+            self.in_connections = 0
+            self.out_connections = 0
 
         def get_total_index(self) -> int:
             # returns the absolute index of this node in the entire incidence graph
@@ -36,7 +43,7 @@ class IncidenceGraph(Collection):
             # neighbors are nodes in the same dimension as the current one
 
             if isinstance(dist, int):
-                dist = set().add(dist)
+                dist = {dist}
             else:
                 dist = set(dist)
 
@@ -77,7 +84,7 @@ class IncidenceGraph(Collection):
             # a positive rel_dim means a higher dimension, a negative one means a lower dimension
 
             if isinstance(rel_dim, int):
-                rel_dim = set().add(rel_dim)
+                rel_dim = {rel_dim}
             else:
                 rel_dim = set(rel_dim)
 
@@ -170,11 +177,46 @@ class IncidenceGraph(Collection):
                 if count == (self.d + 1) * self.d:
                     self.graph.put_simplex(self.vertices + (vertex,), data_gen=data_gen)
 
+        def remove_lower(self, index: int, dir_in: Optional[bool] = None) -> None:
+            # removes a lower-dimensional node from this node
+            # dir_in means remove inbound, False remove out, None remove both
+            node = self.graph._dimensions[self.d - 1][index]
+            if dir_in is None:
+                self.lower.discard(index)
+
+            missing = 0
+            while missing < self.d and self.vertices[missing] == node.vertices[missing]:
+                missing += 1
+            missing = self.d - missing
+            mask = ((1 << (self.d + 1)) - 1) ^ (1 << missing)
+
+            if dir_in is None or dir_in:
+                self.in_connections &= mask
+            if dir_in is None or not dir_in:
+                self.out_connections &= mask
+
+        def add_lower(self, index: int, dir_in: Optional[bool] = None) -> None:
+            # adds a lower-dimensional node to this node
+            # dir_in means add inbound, False add out, None add both
+            node = self.graph._dimensions[self.d - 1][index]
+            self.lower.add(index)
+
+            missing = 0
+            while missing < self.d and self.vertices[missing] == node.vertices[missing]:
+                missing += 1
+            missing = self.d - missing
+            mask = 1 << missing
+
+            if dir_in is None or dir_in:
+                self.in_connections |= mask
+            if dir_in is None or not dir_in:
+                self.out_connections |= mask
+
         def remove_self(self) -> None:
             # removes this node from the parent incidence graph
             self.unset_simplex()
             for i in self.upper:
-                self.graph._dimensions[self.d + 1][i].lower.discard(self.index)
+                self.graph._dimensions[self.d + 1][i].remove_lower(self.index)
             for i in self.lower:
                 self.graph._dimensions[self.d - 1][i].upper.discard(self.index)
 
@@ -303,7 +345,7 @@ class IncidenceGraph(Collection):
             self.__remove_node(index, node.d, False)
             node.unset_simplex()
 
-    def remove_relation(self, va: int | Iterable[int], vb: int | Iterable[int]) -> None:
+    def remove_relation(self, va: int | Iterable[int], vb: int | Iterable[int], dir_in: Optional[bool] = None) -> None:
         """Removes an incidence relation between two nodes. (This does not remove the nodes themselves.) Note that the
         node in the upper-dimension will no longer be a simplex.
 
@@ -331,15 +373,15 @@ class IncidenceGraph(Collection):
         if na.d > nb.d:
             if ia in nb.upper and ib in na.lower:
                 nb.upper.discard(ia)
-                na.lower.discard(ib)
+                na.remove_lower(ib, dir_in)
                 na.unset_simplex()
             else:
                 raise ValueError(f'No relation between {va} and {vb}')
         elif na.d < nb.d:
             self.remove_relation(vb, va)
 
-    def put_incidence_relation(self, vertex_list: Iterable[int | Iterable[int]], data: Any = None,
-                               data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
+    def put_incidence_relation(self, src_list: Iterable[int | Iterable[int]], dest_list: Iterable[int | Iterable[int]],
+                               data: Any = None, data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
         """Creates a higher-dimensional node as a connection of a list of (existing) lower-dimensional nodes with the
         same dimension. In other words, creates a non-simplex node.
 
@@ -365,9 +407,10 @@ class IncidenceGraph(Collection):
             KeyError: If any node does not exist in the graph.
         """
         vertices = set()
-        indices = set()
+        src_indices = set()
+        dest_indices = set()
         d = -1
-        for vs in vertex_list:
+        for vs in src_list:
             vs = IncidenceGraph.__type_check(vs)
             if d == -1:
                 d = len(vs) - 1
@@ -376,13 +419,30 @@ class IncidenceGraph(Collection):
             i, _ = self.__get(vs)
             if i == -1:
                 raise KeyError(f'No node with vertices {vs}')
-            indices.add(i)
+            src_indices.add(i)
+            for v in vs:
+                vertices.add(v)
+        for vs in dest_list:
+            vs = IncidenceGraph.__type_check(vs)
+            if d == -1:
+                d = len(vs) - 1
+            elif d != len(vs) - 1:
+                raise ValueError(f'All nodes must be of the same dimension.')
+            i, _ = self.__get(vs)
+            if i == -1:
+                raise KeyError(f'No node with vertices {vs}')
+            dest_indices.add(i)
             for v in vs:
                 vertices.add(v)
         vertices = tuple(sorted(vertices))
 
         index, node = self.__make_node(vertices, data)
-        node.lower.update(indices)
+        for i in src_indices:
+            node.add_lower(i, dir_in=True)
+            self._dimensions[d][i].upper.add(i)
+        for i in dest_indices:
+            node.add_lower(i, dir_in=False)
+            self._dimensions[d][i].lower.add(i)
         node.apply_data_gen(data_gen)
 
     def get(self, vertices: int | Iterable[int]) -> Any:
@@ -408,8 +468,8 @@ class IncidenceGraph(Collection):
 
         return node.data
 
-    def get_many(self, v_list: Iterable[int | Iterable[int]]) -> List[Any]:
-        """Returns a list of the data associated with the given nodes.
+    def get_many(self, v_list: Iterable[int | Iterable[int]]) -> Iterable[Any]:
+        """Returns an iterable of the data associated with the given nodes.
 
         Args:
             v_list: An iterable of nodes. Each node is an integer (for 0-dimensional nodes) or an iterable of integers
@@ -418,13 +478,14 @@ class IncidenceGraph(Collection):
                 For example, 2 or (2,) refers to the vertex (index) 2 from the graph. (2, 3) refers to an edge between
                 vertices 2 and 3.
 
-        Returns: A list of the data associated with the given nodes, in the order that the nodes are provided.
+        Returns: An iterable of the data associated with the given nodes, in the order that the nodes are provided.
 
         Raises:
             KeyError: If any of the given nodes are not in the graph.
 
         """
-        return [self.get(v) for v in v_list]
+        for v in v_list:
+            yield self.get(v)
 
     def neighbors(self, vertices: int | Iterable[int], dist: int = 1) -> Iterable[Tuple[int, ...]]:
         """Returns the neighbors of the given node at the given distance.
@@ -458,7 +519,7 @@ class IncidenceGraph(Collection):
         for i, _ in node.neighbor_relations(dist):
             yield self._dimensions[node.d][i].vertices
 
-    def incidence_neighbors(self, vertices: int | Iterable[int], rel_dim: int = 0) -> Iterable[Tuple[int, ...]]:
+    def incidence_neighbors(self, vertices: int | Iterable[int], rel_dim: int = 1) -> Iterable[Tuple[int, ...]]:
         """Returns all nodes that are incident to the given node by a relation of the given dimension.
 
         Args:
@@ -485,7 +546,18 @@ class IncidenceGraph(Collection):
         for i, _ in node.incidence_relations(rel_dim):
             yield self._dimensions[node.d + rel_dim][i].vertices
 
-    def adjacency_list(self, rel: int = 0, incidence: bool = True,
+    def degree_list(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                       node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterable[int]:
+        for node in self.__get_many(node_list):
+            degree = 0
+            for dist in neighbor_dists:
+                degree += sum(1 for _ in node.neighbor_relations(dist))
+            for dim in rel_dims:
+                degree += sum(1 for _ in node.incidence_relations(dim))
+
+            yield degree
+
+    def adjacency_list(self, rel: int = 1, incidence: bool = False,
                        node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterable[Tuple[int, int]]:
         """Returns an adjacency list from a vertex list or the whole graph for the given relation distance and type.
 
@@ -511,17 +583,7 @@ class IncidenceGraph(Collection):
 
         offsets = list(itertools.accumulate([0] + self.shape()))
 
-        if node_list is None:
-            nodes = self.__flatten()
-        else:
-            nodes = []
-            for v in node_list:
-                i, n = self.__get(IncidenceGraph.__type_check(v))
-                if i == -1:
-                    raise KeyError(f'No node with vertices {v}')
-                nodes.append(n)
-
-        for node in nodes:
+        for node in self.__get_many(node_list):
             if incidence:
                 iter = node.incidence_relations(rel)
             else:
@@ -529,20 +591,26 @@ class IncidenceGraph(Collection):
             for j, _ in iter:
                 yield offsets[node.d] + node.index, offsets[node.d + rel] + j
 
-    def adjacency_matrix(self, rel: int = 0, incidence: bool = True) -> NDArray[np.float32]:
+    def adjacency_matrix(self, rel: int = 1, incidence: bool = False, src_weights: Optional[Sequence[Any]] = None,
+                         dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
         """
         Returns an adjacency matrix for the given relation distance and type.
 
         Args:
             rel: The distance or number of dimensions away in the relation.
             incidence: Whether to encode incidence (True) or neighbor (False) relations.
+            src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
+                adjacency matrix at position i, j.
+            dest_weights: If nodes i and j are adjacent and dest_weights is not none, multiplies dest_weights[j] to the
+                adjacency matrix at position i, j.
 
         Returns: A (1, n, n) adjacency matrix, where `n` is the number of nodes. To remove the first dimension, use
             numpy's squeeze() function.
         """
-        return self.partial_matrix(rel, incidence)()
+        return self.partial_matrix(rel, incidence, src_weights=src_weights, dest_weights=dest_weights)()
 
-    def partial_matrix(self, rel: int, incidence: bool = True, partial_size: Optional[int] = None) -> NDArray[
+    def partial_matrix(self, rel: int = 1, incidence: bool = False, partial_size: Optional[int] = None, src_weights: Optional[Sequence[Any]] = None,
+                         dest_weights: Optional[Sequence[Any]] = None) -> NDArray[
         np.float32]:
         """
         Returns a function that generates partial adjacency matrices for the given relation distance and type.
@@ -551,6 +619,10 @@ class IncidenceGraph(Collection):
             rel: The distance or number of dimensions away in the relation.
             incidence: Whether to encode incidence (True) or neighbor (False) relations.
             partial_size: The size `p` of the (a, p, n) matrices to return. If `None`, the full matrices are returned.
+            src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
+                adjacency matrix at position i, j.
+            dest_weights: If nodes i and j are adjacent and dest_weights is not none, multiplies dest_weights[j] to the
+                adjacency matrix at position i, j.
 
         Returns:
             A function that returns a (1, p, n) partial matrix when invoked, where `p` is the partial size and `n` is
@@ -561,11 +633,12 @@ class IncidenceGraph(Collection):
             StopIteration: Once all partial matrices have been returned.
         """
         if incidence:
-            return self.partial_matrices([], [rel], partial_size)
+            return self.partial_matrices([], [rel], partial_size, src_weights=src_weights, dest_weights=dest_weights)
         else:
-            return self.partial_matrices([rel], [], partial_size)
+            return self.partial_matrices([rel], [], partial_size, src_weights=src_weights, dest_weights=dest_weights)
 
-    def adjacency_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int]) -> NDArray[np.float32]:
+    def adjacency_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], src_weights: Optional[Sequence[Any]] = None,
+                         dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
         """Returns the full adjacency matrices for the given neighbor distances and incidence dimensions.
 
         Args:
@@ -578,15 +651,21 @@ class IncidenceGraph(Collection):
                 For example, if given [-1, 0, 1, 2], the first adjacency matrix will have lower incidence relations,
                 the second one will be the identity matrix, the third one will have upper incidence relations, and the
                 fourth one will have upper incidence relations that are 2 dimensions away.
+            src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
+                adjacency matrix at position i, j.
+            dest_weights: If nodes i and j are adjacent and dest_weights is not none, multiplies dest_weights[j] to the
+                adjacency matrix at position i, j.
 
         Returns: An (a, n, n) array, where `a` is the number of adjacency matrices and `n` is the number of nodes in
             the graph.
 
         """
-        return self.partial_matrices(neighbor_dists, rel_dims)()
+        return self.partial_matrices(neighbor_dists, rel_dims, src_weights=src_weights, dest_weights=dest_weights)()
 
     def partial_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
-                         partial_size: Optional[int] = None) -> Callable[[], NDArray[np.float32]]:
+                         partial_size: Optional[int] = None,
+                         src_weights: Optional[Sequence[Any]] = None,
+                         dest_weights: Optional[Sequence[Any]] = None) -> Callable[[], NDArray[np.float32]]:
         """Returns a function that returns partial adjacency matrices of this graph, like an iterator,
         for the given neighbor distances and incidence dimensions.
 
@@ -601,6 +680,10 @@ class IncidenceGraph(Collection):
                 the second one will be the identity matrix, the third one will have upper incidence relations, and the
                 fourth one will have upper incidence relations that are 2 dimensions away.
             partial_size: The size `p` of the (a, p, n) matrices to return. If `None`, the full matrices are returned.
+            src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
+                adjacency matrix at position i, j.
+            dest_weights: If nodes i and j are adjacent and dest_weights is not none, multiplies dest_weights[j] to the
+                adjacency matrix at position i, j.
 
         Returns:
             A function that returns the adjacency matrices as an (a, p, n) array, where `a` is the number of adjacency
@@ -619,6 +702,8 @@ class IncidenceGraph(Collection):
             raise ValueError('Partial matrix size must be positive')
 
         starts = iter(range(0, N, partial_size))
+
+        # maps distances to lists of indices of adjacency matrices
         reverse_rel_dims = dict()
         reverse_neighbors = dict()
         max_dim, min_dim = 0, 0
@@ -647,15 +732,35 @@ class IncidenceGraph(Collection):
 
             adj = np.zeros((A, P, N), dtype=np.float32)
             for n, node in enumerate(flattened[i:i + P]):
-                for j, d in node.neighbor_relations(neighbor_dists):
+                for j, d in itertools.chain(node.neighbor_relations(neighbor_dists), node.incidence_relations(rel_dims)):
                     for k in reverse_neighbors[d]:
-                        adj[k, n, j] = 1.0
-                for j, d in node.incidence_relations(rel_dims):
-                    for k in reverse_rel_dims[d]:
-                        adj[k, n, j] = 1.0
+                        adj[k, j, n] = 1.0
+                        if src_weights is not None:
+                            adj[k, j, n] *= src_weights[i + n]
+                        if dest_weights is not None:
+                            adj[k, j, n] *= dest_weights[j]
 
             return adj
 
+        return next_partial
+
+    @staticmethod
+    def concat_partials(*partial_generators: Callable[[], NDArray[np.float32]])-> Callable[[], NDArray[np.float32]]:
+        """Concatenates partial adjacency matrices from multiple generators into a single generator.
+
+        Args:
+            partial_generators: The partial adjacency matrix generators to concatenate.
+
+        Returns:
+            A generator that returns the adjacency matrices as an (a, p, n) array, where `a` is the number of adjacency
+            matrices, `p` is the partial size, and `n` is the number of nodes in the graph. This function can be used
+            like an iterator. When all matrices have been returned, the returned function raises `StopIteration`.
+        """
+        def next_partial():
+            adj = []
+            for g in partial_generators:
+                adj.append(g())
+            return np.concatenate(adj, axis=0)
         return next_partial
 
     def shape(self) -> List[int]:
@@ -769,6 +874,21 @@ class IncidenceGraph(Collection):
             return index, self._dimensions[d][index]
         return -1, None
 
+    def __get_many(self, node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterator[_IncidenceNode]:
+        # retrieves nodes with list of vertices, with error checking
+        # if no list, returns all nodes
+
+        if node_list is None:
+            for d in range(len(self._dimensions)):
+                for node in self._dimensions[d]:
+                    yield node
+        else:
+            for v in node_list:
+                i, n = self.__get(IncidenceGraph.__type_check(v))
+                if i == -1:
+                    raise KeyError(f'No node with vertices {v}')
+                yield n
+
     def __make_node(self, vertices: Tuple[int, ...], data: Any) -> Tuple[int, _IncidenceNode]:
         # creates a node from a list of vertices and assigns it an index
         d = len(vertices) - 1
@@ -832,6 +952,7 @@ class IncidenceGraph(Collection):
         node = self._dimensions[d][index]
         if d == 0:
             node.is_simplex = True
+            node.in_connections = node.out_connections = 1
             return
 
         for sub_face in itertools.combinations(node.vertices, d):
@@ -846,8 +967,9 @@ class IncidenceGraph(Collection):
         node.apply_data_gen(gen)
 
         node.is_simplex = True
+        node.in_connections = node.out_connections = (1 << (d + 1)) - 1
 
-    def __flatten(self) -> List[IncidenceGraph._IncidenceNode]:
+    def __flatten(self) -> List[_IncidenceNode]:
         # flattens the graph into a list of nodes
         nodes = []
         for d in range(len(self._dimensions)):
@@ -855,7 +977,7 @@ class IncidenceGraph(Collection):
                 nodes.append(node)
         return nodes
 
-    def __iter__(self) -> Iterator[IncidenceGraph._IncidenceNode]:
+    def __iter__(self) -> Iterator[Tuple[Tuple[int, ...], Any]]:
         return IncidenceGraph.IncidenceGraphIterator(self)
 
     def __len__(self) -> int:

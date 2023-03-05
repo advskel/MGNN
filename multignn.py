@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Callable, Any, Tuple
+from typing import Optional, Callable, Any, Tuple, List
 
 import torch
 from torch import Tensor
@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 _tensor_func = Optional[Callable[[Tensor], Tensor]]
 _two_tensor_func = Optional[Callable[[Tensor, Tensor], Tensor]]
-
 
 class PartialForwardNN(nn.Module):
     """
@@ -53,7 +52,8 @@ class MultiGraphLayer(nn.Module):
     # n x n: adjacency matrix
     # H: (n, d)
     # W: (a, d, d) tensor
-    def __init__(self, transform_func: _tensor_func = None, vertex_agg_func: _two_tensor_func = None, graph_agg_func: _tensor_func = None, update_func: _two_tensor_func = None,
+    def __init__(self, transform_func: _tensor_func = None, vertex_agg_func: _two_tensor_func = None,
+                 graph_agg_func: _tensor_func = None, update_func: _two_tensor_func = None,
                  num_vertices: Optional[int] = None):
         """
         Args:
@@ -100,7 +100,6 @@ class MultiGraphLayer(nn.Module):
         self._hasty = 0
 
     def forward(self, x: Tensor, adjs: Tensor) -> Tuple[Optional[Tensor], bool]:
-        # TODO batch forward? where input is (b, n, *) and adjs is (b, a, n, n)
         """
         Args:
             x: an (n, *) tensor representing the vertex embeddings for a 2D graph
@@ -130,7 +129,7 @@ class MultiGraphLayer(nn.Module):
         if n != self.n:
             raise ValueError(f'Adjacency matrix has {n} vertices, but this model expects {self.n}')
         if p > self.n:
-            raise ValueError(f'Adjacency matrix has more "partial" vertices {p} than expected vertices {self.n}')
+            raise PartialForwardError(f'Adjacency matrix has more "partial" vertices {p} than expected vertices {self.n}')
 
         # if p == v < n then 'hasty partial', forward part of graph completely
         if self._partial is None:
@@ -138,15 +137,12 @@ class MultiGraphLayer(nn.Module):
                 # no partial updates
                 return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), True
             elif p == v:
-                self._hasty += p
-                if self._hasty > self.n:
-                    raise ValueError(
+                end = self._hasty + p
+                self._hasty = end % self.n
+                if end > self.n:
+                    raise PartialForwardError(
                         f'Total number of partial vertices {self._hasty} exceeds number of total vertices {self.n}')
-                elif self._hasty == self.n:
-                    self._hasty = 0
-                    return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), True
-                else:
-                    return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), False
+                return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), self._hasty == 0
 
         if v != self.n:
             raise ValueError(f'Graph has {v} vertices, but this model expects {self.n}')
@@ -154,12 +150,12 @@ class MultiGraphLayer(nn.Module):
         if self._partial is not None:
             a2, p2, d2 = self._partial.shape
             if a2 != a:
-                raise ValueError(f'Adjacency matrix has {a} adjacency matrices, but past input(s) had {a2}')
+                raise PartialForwardError(f'Adjacency matrix has {a} adjacency matrices, but past input(s) had {a2}')
             if d2 != d:
-                raise ValueError(f'Graph has {d} embedding dimensions, but past input(s) had {d2}')
+                raise PartialForwardError(f'Graph has {d} embedding dimensions, but past input(s) had {d2}')
             if p2 + p > n:
-                raise ValueError(
-                    f'The graph should have {n} vertices, but after this partial update, it will have {p2 + p}')
+                raise PartialForwardError(
+                    f'The graph should have {n} total vertices, but after this partial update, it will have {p2 + p}')
 
         partial_vertex_agg = self.v_agg(graph, adjs)
         if len(partial_vertex_agg.shape) != 3:
@@ -169,7 +165,7 @@ class MultiGraphLayer(nn.Module):
             raise ValueError(
                 f'Vertex aggregation function outputted {a2} adjacency matrices, but this model expects {a} based on the input')
         if p2 != p:
-            raise ValueError(
+            raise PartialForwardError(
                 f'Vertex aggregation function outputted {p2} partial vertices, but this model expects {p} based on the input')
         if d2 != d:
             raise ValueError(
@@ -207,14 +203,18 @@ class MultiGraphLayer(nn.Module):
         return new_graph, True
 
 
-class LinearAggregate(nn.Module):
+class LinearGraphAggregate(nn.Module):
     """
-    Layer that applies a linear transformation to each of `a` matrices in an (a, n, d) tensor and sums them.
+    Layer that applies a linear transformation to each of `a` matrices in an (a, n, d) tensor and aggregates them.
     """
-    def __init__(self, num_layers: int, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
+    def __init__(self, num_graphs: int, num_features: int, agg_func: _tensor_func = None, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
         super().__init__()
-        self.a = num_layers
+        self.a = num_graphs
         self.d = num_features
+
+        if agg_func is None:
+            agg_func = lambda x: torch.sum(x, dim=0)
+        self.aggregate = agg_func
 
         if activation_func is None:
             activation_func = lambda x: x
@@ -241,13 +241,13 @@ class LinearAggregate(nn.Module):
 
         """
         if self.use_weights and self.use_bias:
-            return self.activate(torch.sum(graphs @ self.W + self.B, dim=0))
+            return self.activate(self.aggregate(graphs @ self.W + self.B))
         elif self.use_weights:
-            return self.activate(torch.sum(graphs @ self.W, dim=0))
+            return self.activate(self.aggregate(graphs @ self.W))
         elif self.use_bias:
-            return self.activate(torch.sum(graphs + self.B, dim=0))
+            return self.activate(self.aggregate(graphs + self.B))
         else:
-            return self.activate(torch.sum(graphs, dim=0))
+            return self.activate(self.aggregate(graphs))
 
 
 class LinearMessageUpdate(nn.Module):
@@ -319,3 +319,7 @@ class EmbeddingGenerator(nn.Module):
 
         """
         return self.W
+
+
+class PartialForwardError(Exception):
+    """Raised when a partial forward input is invalid."""
