@@ -53,6 +53,7 @@ class IncidenceGraph(Collection):
                     raise ValueError('Distances must be non-negative')
                 max_dist = max(max_dist, d)
 
+            offsets = list(itertools.accumulate([0] + self.graph.shape()))
             upper_visited = set()
             visited = set()
             bfs = deque()
@@ -65,7 +66,7 @@ class IncidenceGraph(Collection):
                         continue
                     visited.add(index)
                     if d in dist:
-                        yield index, d
+                        yield index + offsets[self.d], d
                     if d < max_dist:
                         for i in node.upper:
                             if i not in upper_visited:
@@ -97,11 +98,11 @@ class IncidenceGraph(Collection):
 
             offsets = list(itertools.accumulate([0] + self.graph.shape()))
             bfs = deque()
-            bfs.append((self, 0))
+            bfs.append((self.index + offsets[self.d], 0))
             visited = set()
             while bfs:
-                node, d = bfs.popleft()
-                id = node.index + offsets[node.d]
+                id, d = bfs.popleft()
+                node = self.graph._dimensions[self.d + d][id - offsets[self.d + d]]
                 if id in visited:
                     continue
                 if d in rel_dim:
@@ -111,11 +112,11 @@ class IncidenceGraph(Collection):
                 if 0 <= d < max_dim:
                     for j in node.upper:
                         if j + offsets[node.d + 1] not in visited:
-                            bfs.append((self.graph._dimensions[node.d + 1][j], d + 1))
+                            bfs.append((j + offsets[node.d + 1], d + 1))
                 if 0 >= d > min_dim:
                     for j in node.lower:
                         if j + offsets[node.d - 1] not in visited:
-                            bfs.append((self.graph._dimensions[node.d - 1][j], d - 1))
+                            bfs.append((j + offsets[node.d - 1], d - 1))
 
         # TODO generalize with some probability (so not all connections)
 
@@ -188,12 +189,17 @@ class IncidenceGraph(Collection):
             while missing < self.d and self.vertices[missing] == node.vertices[missing]:
                 missing += 1
             missing = self.d - missing
-            mask = ((1 << (self.d + 1)) - 1) ^ (1 << missing)
+            mask = (self.__max()) ^ (1 << missing)
 
             if dir_in is None or dir_in:
                 self.in_connections &= mask
             if dir_in is None or not dir_in:
                 self.out_connections &= mask
+
+            if self.in_connections != self.__max() or self.out_connections != self.__max():
+                self.unset_simplex()
+            if self.in_connections == 0 and self.out_connections == 0:
+                self.graph.remove_node(self.vertices)
 
         def add_lower(self, index: int, dir_in: Optional[bool] = None) -> None:
             # adds a lower-dimensional node to this node
@@ -212,6 +218,8 @@ class IncidenceGraph(Collection):
             if dir_in is None or not dir_in:
                 self.out_connections |= mask
 
+            self.check_simplex()
+
         def remove_self(self) -> None:
             # removes this node from the parent incidence graph
             self.unset_simplex()
@@ -227,6 +235,23 @@ class IncidenceGraph(Collection):
             self.is_simplex = False
             for i in self.upper:
                 self.graph._dimensions[self.d + 1][i].unset_simplex()
+
+        def check_simplex(self) -> None:
+            # marks this node and all upper-dimensional connections as a simplex
+            if self.is_simplex:
+                return
+            if self.in_connections != self.__max() or self.out_connections != self.__max():
+                return
+            for i in self.lower:
+                if not self.graph._dimensions[self.d - 1][i].is_simplex:
+                    return
+
+            self.is_simplex = True
+            for i in self.upper:
+                self.graph._dimensions[self.d + 1][i].check_simplex()
+
+        def __max(self):
+            return (1 << (self.d + 1)) - 1
 
         def __repr__(self) -> str:
             return f'{self.vertices}: {self.data}'
@@ -345,6 +370,7 @@ class IncidenceGraph(Collection):
             self.__remove_node(index, node.d, False)
             node.unset_simplex()
 
+    # TODO documentation !!!
     def remove_relation(self, va: int | Iterable[int], vb: int | Iterable[int], dir_in: Optional[bool] = None) -> None:
         """Removes an incidence relation between two nodes. (This does not remove the nodes themselves.) Note that the
         node in the upper-dimension will no longer be a simplex.
@@ -374,7 +400,6 @@ class IncidenceGraph(Collection):
             if ia in nb.upper and ib in na.lower:
                 nb.upper.discard(ia)
                 na.remove_lower(ib, dir_in)
-                na.unset_simplex()
             else:
                 raise ValueError(f'No relation between {va} and {vb}')
         elif na.d < nb.d:
@@ -436,7 +461,12 @@ class IncidenceGraph(Collection):
                 vertices.add(v)
         vertices = tuple(sorted(vertices))
 
-        index, node = self.__make_node(vertices, data)
+        index, node = self.__get(vertices)
+        if index == -1:
+            index, node = self.__make_node(vertices, data)
+        else:
+            node.data = data
+
         for i in src_indices:
             node.add_lower(i, dir_in=True)
             self._dimensions[d][i].upper.add(i)
@@ -591,14 +621,12 @@ class IncidenceGraph(Collection):
             for j, _ in iter:
                 yield offsets[node.d] + node.index, offsets[node.d + rel] + j
 
-    def adjacency_matrix(self, rel: int = 1, incidence: bool = False, src_weights: Optional[Sequence[Any]] = None,
+    def adjacency_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
         """
         Returns an adjacency matrix for the given relation distance and type.
 
         Args:
-            rel: The distance or number of dimensions away in the relation.
-            incidence: Whether to encode incidence (True) or neighbor (False) relations.
             src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
                 adjacency matrix at position i, j.
             dest_weights: If nodes i and j are adjacent and dest_weights is not none, multiplies dest_weights[j] to the
@@ -607,17 +635,15 @@ class IncidenceGraph(Collection):
         Returns: A (1, n, n) adjacency matrix, where `n` is the number of nodes. To remove the first dimension, use
             numpy's squeeze() function.
         """
-        return self.partial_matrix(rel, incidence, src_weights=src_weights, dest_weights=dest_weights)()
+        return self.partial_matrix(neighbor_dists, rel_dims, src_weights=src_weights, dest_weights=dest_weights)()
 
-    def partial_matrix(self, rel: int = 1, incidence: bool = False, partial_size: Optional[int] = None, src_weights: Optional[Sequence[Any]] = None,
+    def partial_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], partial_size: Optional[int] = None, src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[
         np.float32]:
         """
         Returns a function that generates partial adjacency matrices for the given relation distance and type.
 
         Args:
-            rel: The distance or number of dimensions away in the relation.
-            incidence: Whether to encode incidence (True) or neighbor (False) relations.
             partial_size: The size `p` of the (a, p, n) matrices to return. If `None`, the full matrices are returned.
             src_weights: If nodes i and j are adjacent and src_weights is not none, multiplies src_weights[i] to the
                 adjacency matrix at position i, j.
@@ -632,10 +658,11 @@ class IncidenceGraph(Collection):
             ValueError: If `partial_size` is not `None` and not a positive integer.
             StopIteration: Once all partial matrices have been returned.
         """
-        if incidence:
-            return self.partial_matrices([], [rel], partial_size, src_weights=src_weights, dest_weights=dest_weights)
-        else:
-            return self.partial_matrices([rel], [], partial_size, src_weights=src_weights, dest_weights=dest_weights)
+        gen = self.partial_matrices(neighbor_dists, rel_dims, partial_size, src_weights=src_weights, dest_weights=dest_weights)
+        def partial_matrix():
+            adj = gen()
+            return np.expand_dims(np.sum(adj, axis=0), axis=0)
+        return partial_matrix
 
     def adjacency_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
@@ -662,6 +689,7 @@ class IncidenceGraph(Collection):
         """
         return self.partial_matrices(neighbor_dists, rel_dims, src_weights=src_weights, dest_weights=dest_weights)()
 
+    # TODO invalidate generator if graph changes
     def partial_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
                          partial_size: Optional[int] = None,
                          src_weights: Optional[Sequence[Any]] = None,
@@ -732,13 +760,20 @@ class IncidenceGraph(Collection):
 
             adj = np.zeros((A, P, N), dtype=np.float32)
             for n, node in enumerate(flattened[i:i + P]):
-                for j, d in itertools.chain(node.neighbor_relations(neighbor_dists), node.incidence_relations(rel_dims)):
+                for j, d in node.neighbor_relations(neighbor_dists):
                     for k in reverse_neighbors[d]:
                         adj[k, j, n] = 1.0
                         if src_weights is not None:
                             adj[k, j, n] *= src_weights[i + n]
                         if dest_weights is not None:
                             adj[k, j, n] *= dest_weights[j]
+                for j, d in node.incidence_relations(rel_dims):
+                    for k in reverse_rel_dims[d]:
+                        adj[k + len(reverse_neighbors), j, n] = 1.0
+                        if src_weights is not None:
+                            adj[k + len(reverse_neighbors), j, n] *= src_weights[i + n]
+                        if dest_weights is not None:
+                            adj[k + len(reverse_neighbors), j, n] *= dest_weights[j]
 
             return adj
 
