@@ -8,6 +8,45 @@ import heapq
 from unionfind import UnionFind
 
 
+def osm_import_directed(location):
+    import osmnx as ox
+
+    print('Importing graph from OSM...')
+    G = ox.utils_graph.get_digraph(ox.graph_from_place(location, network_type="drive"))
+    converted = IncidenceGraph()
+
+    mapping = dict()
+    i = 0
+    print('Converting graph to IncidenceGraph...')
+    for u, d in G.nodes(data=True):
+        mapping[u] = i
+        converted.put_simplex(vertices=i, data=np.array([d['x'], d['y']], dtype=np.float32))
+        i += 1
+    for u, v, d in G.edges(data=True):
+        if mapping[u] == mapping[v]:
+            continue
+        converted.put_incidence_relation(src_list=[mapping[u]], dest_list=[mapping[v]], data=d['length'])
+    return converted
+
+def osm_import_undirected(location):
+    import osmnx as ox
+
+    G = ox.utils_graph.get_digraph(ox.graph_from_place(location, network_type="drive"))
+    converted = IncidenceGraph()
+
+    mapping = dict()
+    i = 0
+    for u, d in G.nodes(data=True):
+        mapping[u] = i
+        converted.put_simplex(vertices=i, data=np.array([d['x'], d['y']], dtype=np.float32))
+        i += 1
+    for u, v, d in G.edges(data=True):
+        if mapping[u] == mapping[v]:
+            continue
+        converted.put_simplex(vertices=(mapping[u], mapping[v]), data=d['length'])
+    return converted
+
+
 # TODO import existing graph based on adj matrix or edge list
 def grid(rows: int, cols: int) -> Tuple[IncidenceGraph, Callable[[int, int], int], Callable[[int], Tuple[int, int]]]:
     # TODO create option to connect diagonally
@@ -166,7 +205,7 @@ def astar(graph: IncidenceGraph, i: int, j: int,
         dists[v] = dist
 
         _, node = graph._IncidenceGraph__get((v,))
-        for neighbor in node.neighbors:
+        for neighbor, _ in node.neighbor_relations():
             edge = graph.get((v, neighbor))
             if edge < 0:
                 raise ValueError('Negative edge weight')
@@ -211,14 +250,14 @@ def dijkstra_sp(graph: IncidenceGraph, i: int) -> Tuple[List[float], List[int]]:
     while len(pq) > 0:
         dist, e, v = heapq.heappop(pq)
         if dists[v] != -1:
-            if dist == dists[v]:
+            if dist <= dists[v]:
                 edges[v] = min(edges[v], e)
             continue
         dists[v] = dist
         edges[v] = e
 
         _, node = graph._IncidenceGraph__get((v,))
-        for neighbor in node.neighbors:
+        for neighbor, _ in node.neighbor_relations():
             if dists[neighbor] != -1:
                 continue
             edge = graph.get((v, neighbor))
@@ -244,9 +283,10 @@ def all_pairs_sp(graph: IncidenceGraph) -> Tuple[List[List[float]], List[List[in
     """
     dists = []
     edges = []
-    for i in range(graph.size(0)):
-        dists.append(dijkstra_sp(graph, i)[0])
-        edges.append(dijkstra_sp(graph, i)[1])
+    for i in tqdm(range(graph.size(0)), desc='All-pairs shortest paths'):
+        sp = dijkstra_sp(graph, i)
+        dists.append(sp[0])
+        edges.append(sp[1])
     return dists, edges
 
 

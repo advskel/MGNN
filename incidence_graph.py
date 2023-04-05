@@ -53,7 +53,6 @@ class IncidenceGraph(Collection):
                     raise ValueError('Distances must be non-negative')
                 max_dist = max(max_dist, d)
 
-            offsets = list(itertools.accumulate([0] + self.graph.shape()))
             upper_visited = set()
             visited = set()
             bfs = deque()
@@ -66,7 +65,7 @@ class IncidenceGraph(Collection):
                         continue
                     visited.add(index)
                     if d in dist:
-                        yield index + offsets[self.d], d
+                        yield index, d
                     if d < max_dist:
                         for i in node.upper:
                             if i not in upper_visited:
@@ -96,14 +95,13 @@ class IncidenceGraph(Collection):
                 else:
                     max_dim = max(max_dim, d)
 
-            offsets = list(itertools.accumulate([0] + self.graph.shape()))
             bfs = deque()
-            bfs.append((self.index + offsets[self.d], 0))
+            bfs.append((self.index, 0))
             visited = set()
             while bfs:
                 id, d = bfs.popleft()
-                node = self.graph._dimensions[self.d + d][id - offsets[self.d + d]]
-                if id in visited:
+                node = self.graph._dimensions[self.d + d][id]
+                if (id, d) in visited:
                     continue
                 if d in rel_dim:
                     yield id, d
@@ -111,12 +109,12 @@ class IncidenceGraph(Collection):
 
                 if 0 <= d < max_dim:
                     for j in node.upper:
-                        if j + offsets[node.d + 1] not in visited:
-                            bfs.append((j + offsets[node.d + 1], d + 1))
+                        if (j, node.d + 1) not in visited:
+                            bfs.append((j, d + 1))
                 if 0 >= d > min_dim:
                     for j in node.lower:
-                        if j + offsets[node.d - 1] not in visited:
-                            bfs.append((j + offsets[node.d - 1], d - 1))
+                        if (j, node.d - 1) not in visited:
+                            bfs.append((j, d - 1))
 
         # TODO generalize with some probability (so not all connections)
 
@@ -138,18 +136,7 @@ class IncidenceGraph(Collection):
 
             return adj
 
-        def apply_data_gen(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
-            # applies a data generator function to this node
-            # it takes a list of data from the lower dimension nodes and returns the data for this node
-
-            if data_gen is None:
-                return
-            data = []
-            for i in self.lower:
-                data.append(self.graph._dimensions[self.d - 1][i].data)
-            self.data = data_gen(data)
-
-        def generalize(self, data_gen: Optional[Callable[[List[Any]], Any]]) -> None:
+        def generalize(self) -> None:
             # generalizes this node (see generalize function in IncidenceGraph)
 
             if self.d == 0:
@@ -176,7 +163,7 @@ class IncidenceGraph(Collection):
 
             for vertex, count in counts.items():
                 if count == (self.d + 1) * self.d:
-                    self.graph.put_simplex(self.vertices + (vertex,), data_gen=data_gen)
+                    self.graph.put_simplex(self.vertices + (vertex,))
 
         def remove_lower(self, index: int, dir_in: Optional[bool] = None) -> None:
             # removes a lower-dimensional node from this node
@@ -205,7 +192,6 @@ class IncidenceGraph(Collection):
             # adds a lower-dimensional node to this node
             # dir_in means add inbound, False add out, None add both
             node = self.graph._dimensions[self.d - 1][index]
-            self.lower.add(index)
 
             missing = 0
             while missing < self.d and self.vertices[missing] == node.vertices[missing]:
@@ -216,6 +202,7 @@ class IncidenceGraph(Collection):
             if dir_in is None or dir_in:
                 self.in_connections |= mask
             if dir_in is None or not dir_in:
+                self.lower.add(index)
                 self.out_connections |= mask
 
             self.check_simplex()
@@ -300,8 +287,7 @@ class IncidenceGraph(Collection):
             List[IncidenceGraph._IncidenceNode]] = []  # dimensions[d] stores list of nodes of dimension d
         self._dimensions.append([])
 
-    def put_simplex(self, vertices: int | Iterable[int], data: Any = None,
-                    data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
+    def put_simplex(self, vertices: int | Iterable[int], data: Any = None) -> None:
         """Adds a simplex (node) to the graph with the given vertices and data, or updates an existing one with the
         provided data.
 
@@ -315,9 +301,6 @@ class IncidenceGraph(Collection):
         necessary). For example, when adding (0, 1, 2) to an empty graph, the vertices (0), (1), and (2) are added
         to the graph, and then the edges (0, 1) and (0, 2) and (1, 2).
 
-        Finally, the data of the added simplex will be imputed with the data generator (first priority, if provided) or
-        the given data (second priority, if provided). If neither is provided, the data will be None.
-
         Args:
             vertices: The node to add as an integer (for 0-dimensional nodes) or an iterable of integers (for higher-
                 dimensional nodes).
@@ -326,22 +309,18 @@ class IncidenceGraph(Collection):
                 vertices 2 and 3.
             data: The data to store in the simplex. Note that this data will be overwritten by the data generator if
                 provided.
-            data_gen: A function that takes a list of data (which will come from the lower neighbors) and outputs
-                something.
         """
         vertices = IncidenceGraph.__type_check(vertices)
         d = len(vertices) - 1
         index, node = self.__get(vertices)
         if index == -1:
             index, _ = self.__make_node(vertices, data)
-            self.__make_simplex(index, d, data, data_gen)
+            self.__make_simplex(index, d)
         else:
             node = self._dimensions[d][index]
+            node.data = data
             if not node.is_simplex:
-                self.__make_simplex(index, d, data, data_gen)
-            else:
-                node.data = data
-                node.apply_data_gen(data_gen)
+                self.__make_simplex(index, d)
 
     def remove_node(self, vertices: int | Iterable[int], as_simplex: bool = False) -> None:
         """Removes a node from the graph.
@@ -405,8 +384,8 @@ class IncidenceGraph(Collection):
         elif na.d < nb.d:
             self.remove_relation(vb, va)
 
-    def put_incidence_relation(self, src_list: Iterable[int | Iterable[int]], dest_list: Iterable[int | Iterable[int]],
-                               data: Any = None, data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
+    def put_incidence_relation(self, src_list: Iterable[int | Iterable[int]], dest_list: Optional[Iterable[int | Iterable[int]]] = None,
+                               data: Any = None) -> None:
         """Creates a higher-dimensional node as a connection of a list of (existing) lower-dimensional nodes with the
         same dimension. In other words, creates a non-simplex node.
 
@@ -424,8 +403,6 @@ class IncidenceGraph(Collection):
                 vertices 2 and 3.
             data: The data to store in the simplex. Note that this data will be overwritten by the data generator if
                 provided.
-            data_gen: A function that takes a list of data (which will come from the lower neighbors) and outputs
-                something.
 
         Raises:
             ValueError: If the nodes are not of the same dimension.
@@ -433,7 +410,7 @@ class IncidenceGraph(Collection):
         """
         vertices = set()
         src_indices = set()
-        dest_indices = set()
+
         d = -1
         for vs in src_list:
             vs = IncidenceGraph.__type_check(vs)
@@ -447,20 +424,26 @@ class IncidenceGraph(Collection):
             src_indices.add(i)
             for v in vs:
                 vertices.add(v)
-        for vs in dest_list:
-            vs = IncidenceGraph.__type_check(vs)
-            if d == -1:
-                d = len(vs) - 1
-            elif d != len(vs) - 1:
-                raise ValueError(f'All nodes must be of the same dimension.')
-            i, _ = self.__get(vs)
-            if i == -1:
-                raise KeyError(f'No node with vertices {vs}')
-            dest_indices.add(i)
-            for v in vs:
-                vertices.add(v)
-        vertices = tuple(sorted(vertices))
 
+        if dest_list is None:
+            dest_indices = src_indices
+        else:
+            dest_indices = set()
+            for vs in dest_list:
+                vs = IncidenceGraph.__type_check(vs)
+                if d == -1:
+                    d = len(vs) - 1
+                elif d != len(vs) - 1:
+                    raise ValueError(f'All nodes must be of the same dimension.')
+                i, _ = self.__get(vs)
+                if i == -1:
+                    raise KeyError(f'No node with vertices {vs}')
+                dest_indices.add(i)
+                for v in vs:
+                    vertices.add(v)
+        vertices = tuple(sorted(vertices))
+        if len(vertices) - 1 != d + 1:
+            raise ValueError(f'List of nodes of dimension {d} forms a node of dimension {len(vertices) - 1} instead of {d + 1}')
         index, node = self.__get(vertices)
         if index == -1:
             index, node = self.__make_node(vertices, data)
@@ -469,11 +452,60 @@ class IncidenceGraph(Collection):
 
         for i in src_indices:
             node.add_lower(i, dir_in=True)
-            self._dimensions[d][i].upper.add(i)
+            self._dimensions[d][i].upper.add(index)
         for i in dest_indices:
             node.add_lower(i, dir_in=False)
-            self._dimensions[d][i].lower.add(i)
-        node.apply_data_gen(data_gen)
+
+    def generalize_data(self, vertices: int | Iterable[int], neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                        func: Optional[Callable[[List[Any]], Any]]) -> Any:
+        """Generates data for a node based on the data of its neighbors.
+        """
+        vs = IncidenceGraph.__type_check(vertices)
+        index, node = self.__get(vs)
+        if index == -1:
+            raise KeyError(f'No node with vertices {vertices}')
+        data = []
+        for id, _ in node.neighbor_relations(neighbor_dists):
+            data.append(self._dimensions[node.d][id].data)
+        for id, d in node.incidence_relations(rel_dims):
+            data.append(self._dimensions[node.d + d][id].data)
+        new_data = func(data)
+        node.data = new_data
+        return new_data
+
+    def propagate_data(self, vertices: int | Iterable[int], data: Any, neighbor_dists: Iterable[int], rel_dims: Iterable[int]
+                       , update: Optional[Callable[[Any], Any]]=None) -> None:
+        """Propagates data from a node to its neighbors.
+        by default replaces data
+        """
+        vs = IncidenceGraph.__type_check(vertices)
+        index, node = self.__get(vs)
+        if index == -1:
+            raise KeyError(f'No node with vertices {vertices}')
+        if update is None:
+            update = lambda x, y: y
+        for id, _ in node.neighbor_relations(neighbor_dists):
+            n = self._dimensions[node.d][id]
+            n.data = data if n.data is None else update(n.data, data)
+        for id, d in node.incidence_relations(rel_dims):
+            n = self._dimensions[node.d + d][id]
+            n.data = data if n.data is None else update(n.data, data)
+
+    def node_list(self, dims: Optional[int | Iterable[int]] = None, simplex_only: bool = False) -> List[List[int]]:
+        """Returns a list of all nodes in the graph.
+
+        Args:
+            dims: The dimensions of the nodes to return. If None, returns all nodes.
+            simplex_only: If True, only returns nodes that are simplexes.
+
+        Returns:
+            A list of all nodes in the graph.
+        """
+        if dims is None:
+            dims = range(1, len(self._dimensions))
+        elif isinstance(dims, int):
+            dims = (dims,)
+        return [list(node.vertices) for d in dims for node in self._dimensions[d] if not simplex_only or simplex_only and node.is_simplex]
 
     def get(self, vertices: int | Iterable[int]) -> Any:
         """Returns the data associated with the given node.
@@ -577,7 +609,7 @@ class IncidenceGraph(Collection):
             yield self._dimensions[node.d + rel_dim][i].vertices
 
     def degree_list(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
-                       node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterable[int]:
+                       node_list: Optional[Iterable[int | Iterable[int]]] = None, pow: float = 1.0) -> Iterable[float]:
         for node in self.__get_many(node_list):
             degree = 0
             for dist in neighbor_dists:
@@ -585,7 +617,7 @@ class IncidenceGraph(Collection):
             for dim in rel_dims:
                 degree += sum(1 for _ in node.incidence_relations(dim))
 
-            yield degree
+            yield degree ** pow if degree != 0.0 else 0.0
 
     def adjacency_list(self, rel: int = 1, incidence: bool = False,
                        node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterable[Tuple[int, int]]:
@@ -611,7 +643,7 @@ class IncidenceGraph(Collection):
             KeyError: If a vertex in `vertex_list` is not in the graph.
         """
 
-        offsets = list(itertools.accumulate([0] + self.shape()))
+        offsets = self.__offsets()
 
         for node in self.__get_many(node_list):
             if incidence:
@@ -621,7 +653,8 @@ class IncidenceGraph(Collection):
             for j, _ in iter:
                 yield offsets[node.d] + node.index, offsets[node.d + rel] + j
 
-    def adjacency_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], src_weights: Optional[Sequence[Any]] = None,
+    def adjacency_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], dims: Optional[Iterable[int]] = None,
+                         src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
         """
         Returns an adjacency matrix for the given relation distance and type.
@@ -635,9 +668,11 @@ class IncidenceGraph(Collection):
         Returns: A (1, n, n) adjacency matrix, where `n` is the number of nodes. To remove the first dimension, use
             numpy's squeeze() function.
         """
-        return self.partial_matrix(neighbor_dists, rel_dims, src_weights=src_weights, dest_weights=dest_weights)()
+        return self.partial_matrix(neighbor_dists, rel_dims, dims=dims, src_weights=src_weights, dest_weights=dest_weights)()
 
-    def partial_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], partial_size: Optional[int] = None, src_weights: Optional[Sequence[Any]] = None,
+    def partial_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                       dims: Optional[Iterable[int]] = None,
+                       partial_size: Optional[int] = None, src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[
         np.float32]:
         """
@@ -658,13 +693,15 @@ class IncidenceGraph(Collection):
             ValueError: If `partial_size` is not `None` and not a positive integer.
             StopIteration: Once all partial matrices have been returned.
         """
-        gen = self.partial_matrices(neighbor_dists, rel_dims, partial_size, src_weights=src_weights, dest_weights=dest_weights)
+        gen = self.partial_matrices(neighbor_dists, rel_dims, dims=dims, partial_size=partial_size, src_weights=src_weights, dest_weights=dest_weights)
         def partial_matrix():
             adj = gen()
             return np.expand_dims(np.sum(adj, axis=0), axis=0)
         return partial_matrix
 
-    def adjacency_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int], src_weights: Optional[Sequence[Any]] = None,
+    def adjacency_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                           dims: Optional[Iterable[int]] = None,
+                           src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> NDArray[np.float32]:
         """Returns the full adjacency matrices for the given neighbor distances and incidence dimensions.
 
@@ -687,10 +724,11 @@ class IncidenceGraph(Collection):
             the graph.
 
         """
-        return self.partial_matrices(neighbor_dists, rel_dims, src_weights=src_weights, dest_weights=dest_weights)()
+        return self.partial_matrices(neighbor_dists, rel_dims, dims=dims, src_weights=src_weights, dest_weights=dest_weights)()
 
     # TODO invalidate generator if graph changes
     def partial_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                         dims: Optional[Iterable[int]] = None,
                          partial_size: Optional[int] = None,
                          src_weights: Optional[Sequence[Any]] = None,
                          dest_weights: Optional[Sequence[Any]] = None) -> Callable[[], NDArray[np.float32]]:
@@ -721,8 +759,8 @@ class IncidenceGraph(Collection):
         Raises:
             ValueError: If `partial_size` is not `None` and is not a positive integer.
         """
-        flattened = self.__flatten()
-        A, N = 0, len(self)
+        flattened = self.__flatten(dims)
+        A, N = 0, len(flattened)
 
         if partial_size is None or partial_size > N:
             partial_size = N
@@ -730,6 +768,10 @@ class IncidenceGraph(Collection):
             raise ValueError('Partial matrix size must be positive')
 
         starts = iter(range(0, N, partial_size))
+        offsets = self.__offsets(dims)
+
+        if dims is None:
+            dims = set(range(len(self._dimensions)))
 
         # maps distances to lists of indices of adjacency matrices
         reverse_rel_dims = dict()
@@ -761,13 +803,15 @@ class IncidenceGraph(Collection):
             adj = np.zeros((A, P, N), dtype=np.float32)
             for n, node in enumerate(flattened[i:i + P]):
                 for j, d in node.neighbor_relations(neighbor_dists):
+                    j += offsets[node.d]
                     for k in reverse_neighbors[d]:
                         adj[k, j, n] = 1.0
                         if src_weights is not None:
                             adj[k, j, n] *= src_weights[i + n]
                         if dest_weights is not None:
                             adj[k, j, n] *= dest_weights[j]
-                for j, d in node.incidence_relations(rel_dims):
+                for j, d in node.incidence_relations(filter(lambda x: node.d+x in dims, rel_dims)):
+                    j += offsets[node.d + d]
                     for k in reverse_rel_dims[d]:
                         adj[k + len(reverse_neighbors), j, n] = 1.0
                         if src_weights is not None:
@@ -808,8 +852,7 @@ class IncidenceGraph(Collection):
         """
         return [len(d) for d in self._dimensions]
 
-    def generalize(self, dim: Optional[int | Iterable[int]] = None,
-                   data_gen: Optional[Callable[[List[Any]], Any]] = None) -> None:
+    def generalize(self, dim: Optional[int | Iterable[int]] = None) -> None:
         """"Completes" higher-dimensional simplexes if their lower-dimensional connections already exist.
 
         For example, in a graph with vertices 0, 1, 2, and 3, if there exists edges (0, 1), (1, 2), (0, 2), and (1, 3),
@@ -821,8 +864,6 @@ class IncidenceGraph(Collection):
         Args:
             dim: The dimension or dimensions to generalize. If None, all dimensions will be generalized, including
                 newly-created dimensions from this very process.
-            data_gen: An optional function that generates the data for a new node from the data of its
-                     lower-dimensional neighbors. If None, new nodes will have no data (None).
 
         Raises:
             IndexError: If `dim` is not `None` and is not a valid dimension.
@@ -831,17 +872,17 @@ class IncidenceGraph(Collection):
         if dim is None:
             d = 1
             while d < len(self._dimensions):
-                self.generalize(d, data_gen)
+                self.generalize(d)
                 d += 1
         elif isinstance(dim, int):
             if dim >= len(self._dimensions) or dim < 0:
                 raise IndexError(f'Invalid dimension {dim}')
             else:
                 for node in self._dimensions[dim]:
-                    node.generalize(data_gen)
+                    node.generalize()
         elif isinstance(dim, Iterable):
             for d in dim:
-                self.generalize(d, data_gen)
+                self.generalize(d)
         else:
             raise TypeError(f'Invalid type {type(dim)} for `dim`')
 
@@ -982,9 +1023,12 @@ class IncidenceGraph(Collection):
             for j in node.upper:
                 self.__remove_node(d + 1, j, recursive)
 
-    def __make_simplex(self, index: int, d: int, data: Any, gen: Optional[Callable[[Collection[Any]], Any]]) -> None:
+    def __make_simplex(self, index: int, d: int) -> None:
         # turn existing node with dimension d and index into simplex
+        # TODO reimplement bottom-up to avoid recursion
         node = self._dimensions[d][index]
+        if node.is_simplex and node.in_connections == node.out_connections == (1 << (d + 1)) - 1:
+            return
         if d == 0:
             node.is_simplex = True
             node.in_connections = node.out_connections = 1
@@ -993,24 +1037,36 @@ class IncidenceGraph(Collection):
         for sub_face in itertools.combinations(node.vertices, d):
             sub_index, sub_node = self.__get(sub_face)
             if sub_index == -1:
-                sub_index, sub_node = self.__make_node(sub_face, data)
-                self.__make_simplex(sub_index, d - 1, data, gen)
+                sub_index, sub_node = self.__make_node(sub_face, None)
+            self.__make_simplex(sub_index, d - 1)
 
             node.lower.add(sub_index)
             sub_node.upper.add(index)
 
-        node.apply_data_gen(gen)
-
         node.is_simplex = True
         node.in_connections = node.out_connections = (1 << (d + 1)) - 1
 
-    def __flatten(self) -> List[_IncidenceNode]:
+    def __flatten(self, dims: Optional[Iterable[int]] = None) -> List[_IncidenceNode]:
         # flattens the graph into a list of nodes
         nodes = []
-        for d in range(len(self._dimensions)):
+        if dims is None:
+            dims = range(len(self._dimensions))
+        for d in dims:
+            if d >= len(self._dimensions) or d < 0:
+                continue
             for node in self._dimensions[d]:
                 nodes.append(node)
         return nodes
+
+    def __offsets(self, dims: Optional[Iterable[int]] = None) -> List[int]:
+        # returns a list of offsets for each dimension
+        offsets = [0]
+        for d in range(len(self._dimensions)):
+            if dims is None or d in dims:
+                offsets.append(offsets[-1] + len(self._dimensions[d]))
+            else:
+                offsets.append(offsets[-1])
+        return offsets
 
     def __iter__(self) -> Iterator[Tuple[Tuple[int, ...], Any]]:
         return IncidenceGraph.IncidenceGraphIterator(self)
@@ -1020,6 +1076,14 @@ class IncidenceGraph(Collection):
 
     def __getitem__(self, item: Any) -> Any:
         return self.get(item)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        vertices = IncidenceGraph.__type_check(key)
+        index, node = self.__get(vertices)
+        if index == -1:
+            self.put_simplex(vertices, data=value)
+        else:
+            node.data = value
 
     def __contains__(self, item: Any) -> bool:
         try:
