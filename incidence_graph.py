@@ -105,15 +105,15 @@ class IncidenceGraph(Collection):
                     continue
                 if d in rel_dim:
                     yield id, d
-                visited.add(id)
+                visited.add((id, d))
 
                 if 0 <= d < max_dim:
                     for j in node.upper:
-                        if (j, node.d + 1) not in visited:
+                        if (j, d + 1) not in visited:
                             bfs.append((j, d + 1))
                 if 0 >= d > min_dim:
                     for j in node.lower:
-                        if (j, node.d - 1) not in visited:
+                        if (j, d - 1) not in visited:
                             bfs.append((j, d - 1))
 
         # TODO generalize with some probability (so not all connections)
