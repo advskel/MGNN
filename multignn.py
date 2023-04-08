@@ -323,3 +323,13 @@ class EmbeddingGenerator(nn.Module):
 
 class PartialForwardError(Exception):
     """Raised when a partial forward input is invalid."""
+
+def sparse_vertex_agg(graph: Tensor, adj: Tensor | List[Tensor]) -> Tensor:
+    if not isinstance(adj, list):
+        adj = [adj]
+    if len(adj) == 0:
+        raise ValueError('Must provide at least one adjacency matrix')
+    outputs = []
+    for a in adj:
+        outputs.append(torch.sparse.mm(a, graph))
+    return torch.stack(outputs)

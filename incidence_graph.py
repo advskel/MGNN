@@ -6,6 +6,7 @@ from collections import deque
 from typing import List, Tuple, Set, Dict, Optional, Any, Callable, Sequence  # TODO use built-in list, tuple etc.
 import numpy as np
 from numpy.typing import NDArray
+import torch
 
 
 # TODO: read/write graph files
@@ -759,6 +760,11 @@ class IncidenceGraph(Collection):
         Raises:
             ValueError: If `partial_size` is not `None` and is not a positive integer.
         """
+        if dims is None:
+            dims = set(range(len(self._dimensions)))
+        else:
+            dims = set(dims)
+
         flattened = self.__flatten(dims)
         A, N = 0, len(flattened)
 
@@ -769,9 +775,6 @@ class IncidenceGraph(Collection):
 
         starts = iter(range(0, N, partial_size))
         offsets = self.__offsets(dims)
-
-        if dims is None:
-            dims = set(range(len(self._dimensions)))
 
         # maps distances to lists of indices of adjacency matrices
         reverse_rel_dims = dict()
@@ -785,6 +788,7 @@ class IncidenceGraph(Collection):
             else:
                 reverse_neighbors[d] = [i]
                 max_dist = max(max_dist, d)
+        num_neighbors = A
         for i, d in enumerate(rel_dims):
             A += 1
             if d in reverse_rel_dims:
@@ -813,15 +817,95 @@ class IncidenceGraph(Collection):
                 for j, d in node.incidence_relations(filter(lambda x: node.d+x in dims, rel_dims)):
                     j += offsets[node.d + d]
                     for k in reverse_rel_dims[d]:
-                        adj[k + len(reverse_neighbors), j, n] = 1.0
+                        adj[k + num_neighbors, j, n] = 1.0
                         if src_weights is not None:
-                            adj[k + len(reverse_neighbors), j, n] *= src_weights[i + n]
+                            adj[k + num_neighbors, j, n] *= src_weights[i + n]
                         if dest_weights is not None:
-                            adj[k + len(reverse_neighbors), j, n] *= dest_weights[j]
+                            adj[k + num_neighbors, j, n] *= dest_weights[j]
 
             return adj
 
         return next_partial
+
+    def sparse_matrix(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                        dims: Optional[Iterable[int]] = None,
+                        src_weights: Optional[Sequence[Any]] = None,
+                        dest_weights: Optional[Sequence[Any]] = None) -> torch.Tensor:
+        adjs = self.sparse_matrices(neighbor_dists, rel_dims, dims, src_weights, dest_weights)
+        sum = None
+        for i in range(1, len(adjs)):
+            if sum is None:
+                sum = adjs[0] + adjs[i]
+            else:
+                sum += adjs[i]
+        return sum
+
+    def sparse_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                         dims: Optional[Iterable[int]] = None,
+                         src_weights: Optional[Sequence[Any]] = None,
+                         dest_weights: Optional[Sequence[Any]] = None) -> List[torch.Tensor]:
+        if dims is None:
+            dims = set(range(len(self._dimensions)))
+        else:
+            dims = set(dims)
+
+        A, N = 0, sum(len(self._dimensions[d]) for d in dims)
+        offsets = self.__offsets(dims)
+
+        # maps distances to lists of indices of adjacency matrices
+        reverse_rel_dims = dict()
+        reverse_neighbors = dict()
+        max_dim, min_dim = 0, 0
+        max_dist = 0
+        for i, d in enumerate(neighbor_dists):
+            A += 1
+            if d in reverse_neighbors:
+                reverse_neighbors[d].append(i)
+            else:
+                reverse_neighbors[d] = [i]
+                max_dist = max(max_dist, d)
+        num_neighbors = A
+        for i, d in enumerate(rel_dims):
+            A += 1
+            if d in reverse_rel_dims:
+                reverse_rel_dims[d].append(i)
+            else:
+                reverse_rel_dims[d] = [i]
+                max_dim = max(max_dim, d)
+                min_dim = min(min_dim, d)
+
+        coords = []
+        values = []
+        for _ in range(A):
+            coords.append([[], []])
+            values.append([])
+        for n, node in enumerate(self.__iter(dims)):
+            for j, d in node.neighbor_relations(neighbor_dists):
+                j += offsets[node.d]
+                for k in reverse_neighbors[d]:
+                    val = 1.0
+                    if src_weights is not None:
+                        val *= src_weights[n]
+                    if dest_weights is not None:
+                        val *= dest_weights[j]
+                    coords[k][0].append(j)
+                    coords[k][1].append(n)
+                    values[k].append(val)
+            for j, d in node.incidence_relations(filter(lambda x: node.d+x in dims, rel_dims)):
+                j += offsets[node.d + d]
+                for k in reverse_rel_dims[d]:
+                    val = 1.0
+                    if src_weights is not None:
+                        val *= src_weights[n]
+                    if dest_weights is not None:
+                        val *= dest_weights[j]
+                    coords[k + num_neighbors][0].append(j)
+                    coords[k + num_neighbors][1].append(n)
+                    values[k + num_neighbors].append(val)
+        output = []
+        for i in range(A):
+            output.append(torch.sparse_coo_tensor(torch.as_tensor(coords[i]), values[i], (N, N)).coalesce())
+        return output
 
     @staticmethod
     def concat_partials(*partial_generators: Callable[[], NDArray[np.float32]])-> Callable[[], NDArray[np.float32]]:
@@ -1057,6 +1141,16 @@ class IncidenceGraph(Collection):
             for node in self._dimensions[d]:
                 nodes.append(node)
         return nodes
+
+    def __iter(self, dims: Optional[Iterable[int]] = None) -> Iterable[_IncidenceNode]:
+        # iterates over nodes in the graph
+        if dims is None:
+            dims = range(len(self._dimensions))
+        for d in dims:
+            if d >= len(self._dimensions) or d < 0:
+                continue
+            for node in self._dimensions[d]:
+                yield node
 
     def __offsets(self, dims: Optional[Iterable[int]] = None) -> List[int]:
         # returns a list of offsets for each dimension
