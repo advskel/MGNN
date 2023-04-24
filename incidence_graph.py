@@ -610,15 +610,44 @@ class IncidenceGraph(Collection):
             yield self._dimensions[node.d + rel_dim][i].vertices
 
     def degree_list(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
-                       node_list: Optional[Iterable[int | Iterable[int]]] = None, pow: float = 1.0) -> Iterable[float]:
+                       node_list: Optional[Iterable[int | Iterable[int]]] = None,
+                    pow: float = 1.0, add: float = 0.0) -> List[float]:
+        degrees = []
         for node in self.__get_many(node_list):
-            degree = 0
-            for dist in neighbor_dists:
-                degree += sum(1 for _ in node.neighbor_relations(dist))
-            for dim in rel_dims:
-                degree += sum(1 for _ in node.incidence_relations(dim))
+            degree = add + sum(1 for _ in node.neighbor_relations(neighbor_dists)) + \
+                        sum(1 for _ in node.incidence_relations(rel_dims))
 
-            yield degree ** pow if degree != 0.0 else 0.0
+            degrees.append(degree ** pow if degree != 0.0 else 0.0)
+        return degrees
+
+    def degree_lists(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],
+                       node_list: Optional[Iterable[int | Iterable[int]]] = None,
+                    pow: float = 1.0, add: float = 0.0) -> Tuple[Dict[int, List[float]], Dict[int, List[float]]]:
+        neighbor_degrees = {}
+        incidence_degrees = {}
+        for n in neighbor_dists:
+            neighbor_degrees[n] = []
+        for r in rel_dims:
+            incidence_degrees[r] = []
+        for node in self.__get_many(node_list):
+            for key in neighbor_degrees.keys():
+                neighbor_degrees[key].append(add)
+            for key in incidence_degrees.keys():
+                incidence_degrees[key].append(add)
+
+            for _, d in node.neighbor_relations(neighbor_dists):
+                neighbor_degrees[d][-1] += 1
+            for _, d in node.incidence_relations(rel_dims):
+                incidence_degrees[d][-1] += 1
+
+            for key in neighbor_degrees.keys():
+                if neighbor_degrees[key][-1] != 0.0:
+                    neighbor_degrees[key][-1] **= pow
+            for key in incidence_degrees.keys():
+                if incidence_degrees[key][-1] != 0.0:
+                    incidence_degrees[key][-1] **= pow
+
+        return neighbor_degrees, incidence_degrees
 
     def adjacency_list(self, rel: int = 1, incidence: bool = False,
                        node_list: Optional[Iterable[int | Iterable[int]]] = None) -> Iterable[Tuple[int, int]]:
@@ -723,7 +752,6 @@ class IncidenceGraph(Collection):
 
         Returns: An (a, n, n) array, where `a` is the number of adjacency matrices and `n` is the number of nodes in
             the graph.
-
         """
         return self.partial_matrices(neighbor_dists, rel_dims, dims=dims, src_weights=src_weights, dest_weights=dest_weights)()
 
@@ -832,12 +860,9 @@ class IncidenceGraph(Collection):
                         src_weights: Optional[Sequence[Any]] = None,
                         dest_weights: Optional[Sequence[Any]] = None) -> torch.Tensor:
         adjs = self.sparse_matrices(neighbor_dists, rel_dims, dims, src_weights, dest_weights)
-        sum = None
+        sum = adjs[0]
         for i in range(1, len(adjs)):
-            if sum is None:
-                sum = adjs[0] + adjs[i]
-            else:
-                sum += adjs[i]
+            sum += adjs[i]
         return sum
 
     def sparse_matrices(self, neighbor_dists: Iterable[int], rel_dims: Iterable[int],

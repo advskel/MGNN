@@ -6,7 +6,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-_tensor_func = Optional[Callable[[Tensor], Tensor]]
+_tensor_func = Optional[Callable[[Tensor | List[Tensor]], Tensor | List[Tensor]]]
 _two_tensor_func = Optional[Callable[[Tensor, Tensor], Tensor]]
 
 class PartialForwardNN(nn.Module):
@@ -52,8 +52,11 @@ class MultiGraphLayer(nn.Module):
     # n x n: adjacency matrix
     # H: (n, d)
     # W: (a, d, d) tensor
-    def __init__(self, transform_func: _tensor_func = None, vertex_agg_func: _two_tensor_func = None,
+    def __init__(self, transform_func: _tensor_func = None,
+                 adj_transform_func: _tensor_func = None,
+                 vertex_agg_func: Optional[Callable[[Tensor, Tensor | List[Tensor]], Tensor]] = None,
                  graph_agg_func: _tensor_func = None, update_func: _two_tensor_func = None,
+                 output_func: _tensor_func = None,
                  num_vertices: Optional[int] = None):
         """
         Args:
@@ -76,6 +79,10 @@ class MultiGraphLayer(nn.Module):
             transform_func = lambda x: x
         self.transform = transform_func
 
+        if adj_transform_func is None:
+            adj_transform_func = lambda x: x
+        self.adj_transform = adj_transform_func
+
         if vertex_agg_func is None:
             vertex_agg_func = lambda g, a: a @ g
         self.v_agg = vertex_agg_func  # aggregate messages per vertex
@@ -88,6 +95,10 @@ class MultiGraphLayer(nn.Module):
             update_func = lambda g, m: F.relu((g + m) / 2)
         self.update = update_func
 
+        if output_func is None:
+            output_func = lambda x: x
+        self.output = output_func
+
         if num_vertices is not None and (num_vertices <= 0 or not isinstance(num_vertices, int)):
             raise ValueError(f'Number of vertices must be a positive integer or None, but got {num_vertices}')
 
@@ -99,7 +110,7 @@ class MultiGraphLayer(nn.Module):
         self._partial = None
         self._hasty = 0
 
-    def forward(self, x: Tensor, adjs: Tensor) -> Tuple[Optional[Tensor], bool]:
+    def forward(self, x: Tensor, adjs: Tensor | List[Tensor]) -> Tuple[Optional[Tensor], bool]:
         """
         Args:
             x: an (n, *) tensor representing the vertex embeddings for a 2D graph
@@ -116,8 +127,10 @@ class MultiGraphLayer(nn.Module):
             raise ValueError(f'Graph and transformed graph must have same number of vertices, but got'
                              f'{x.shape[0]} (input) and {graph.shape[0]} (transformed)')
 
+        adjs = self.adj_transform(adjs)
+
         if self.n is None:
-            return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), True
+            return self.output(self.update(graph, self.g_agg(self.v_agg(graph, adjs)))), True
 
         if len(graph.shape) != 2:
             raise ValueError(f'Graph must be a 2D tensor, but got {graph.shape}')
@@ -135,14 +148,14 @@ class MultiGraphLayer(nn.Module):
         if self._partial is None:
             if p == self.n:
                 # no partial updates
-                return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), True
+                return self.output(self.update(graph, self.g_agg(self.v_agg(graph, adjs)))), True
             elif p == v:
                 end = self._hasty + p
                 self._hasty = end % self.n
                 if end > self.n:
                     raise PartialForwardError(
                         f'Total number of partial vertices {self._hasty} exceeds number of total vertices {self.n}')
-                return self.update(graph, self.g_agg(self.v_agg(graph, adjs))), self._hasty == 0
+                return self.output(self.update(graph, self.g_agg(self.v_agg(graph, adjs)))), self._hasty == 0
 
         if v != self.n:
             raise ValueError(f'Graph has {v} vertices, but this model expects {self.n}')
@@ -200,17 +213,17 @@ class MultiGraphLayer(nn.Module):
         if d2 != d:
             raise ValueError(
                 f'Update function outputted {d2} embedding dimensions, but this model expects {d} based on the input')
-        return new_graph, True
+
+        output = self.output(new_graph)
+        if output.shape[0] != self.n:
+            raise ValueError(f'Output function outputted {output.shape[0]} vertices, but this model expects {self.n}')
+        return output, True
 
 
-class LinearGraphAggregate(nn.Module):
-    """
-    Layer that applies a linear transformation to each of `a` matrices in an (a, n, d) tensor and aggregates them.
-    """
-    def __init__(self, num_graphs: int, num_features: int, agg_func: _tensor_func = None, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
+class WeightedGraphAggregate(nn.Module):
+    def __init__(self, num_graphs: int, num_nodes: int, num_features: int, agg_func: _tensor_func = None,
+                 activation_func: _tensor_func = None):
         super().__init__()
-        self.a = num_graphs
-        self.d = num_features
 
         if agg_func is None:
             agg_func = lambda x: torch.sum(x, dim=0)
@@ -220,15 +233,8 @@ class LinearGraphAggregate(nn.Module):
             activation_func = lambda x: x
         self.activate = activation_func
 
-        r = math.sqrt(1.0 / self.d)
-
-        self.use_weights = use_weights
-        if use_weights:
-            self.W = nn.Parameter(torch.rand((self.a, self.d, self.d)) * -2.0 * r + r)
-
-        self.use_bias = use_bias
-        if use_bias:
-            self.B = nn.Parameter(torch.rand((self.a, 1, self.d)) * -2.0 * r + r)
+        r = math.sqrt(1.0 / (num_graphs * num_nodes * num_features))
+        self.weights = nn.Parameter(torch.rand((num_graphs, num_nodes, num_features)) * 2.0 * r - r)
 
     def forward(self, graphs: Tensor) -> Tensor:
         """
@@ -240,37 +246,67 @@ class LinearGraphAggregate(nn.Module):
             (n, d) tensor representing combined message from all layers
 
         """
-        if self.use_weights and self.use_bias:
+        return self.activate(self.aggregate(self.weights * graphs))
+
+class LinearGraphAggregate(nn.Module):
+    """
+    Layer that applies a linear transformation to each of `a` matrices in an (a, n, d) tensor and aggregates them.
+    """
+    def __init__(self, num_graphs: int, in_features: int, out_features: Optional[int] = None, agg_func: _tensor_func = None,
+                 activation_func: _tensor_func = None, use_bias: bool = False):
+        super().__init__()
+        self.a = num_graphs
+        if out_features is None:
+            out_features = in_features
+
+        if agg_func is None:
+            agg_func = lambda x: torch.sum(x, dim=0)
+        self.aggregate = agg_func
+
+        if activation_func is None:
+            activation_func = lambda x: x
+        self.activate = activation_func
+
+        r = math.sqrt(1.0 / (in_features * out_features))
+        self.W = nn.Parameter(torch.rand((self.a, in_features, out_features)) * -2.0 * r + r)
+
+        self.B = None
+        if use_bias:
+            r = math.sqrt(1.0 / out_features)
+            self.B = nn.Parameter(torch.rand((self.a, 1, out_features)) * -2.0 * r + r)
+
+    def forward(self, graphs: Tensor) -> Tensor:
+        """
+        Args:
+            graphs: (a, n, d) tensor representing `num_layers` graphs/messages with `n` vertices
+                       represented by embeddings of dimension `num_features`
+
+        Returns:
+            (n, d) tensor representing combined message from all layers
+
+        """
+        if self.B is not None:
             return self.activate(self.aggregate(graphs @ self.W + self.B))
-        elif self.use_weights:
-            return self.activate(self.aggregate(graphs @ self.W))
-        elif self.use_bias:
-            return self.activate(self.aggregate(graphs + self.B))
         else:
-            return self.activate(self.aggregate(graphs))
+            return self.activate(self.aggregate(graphs @ self.W))
 
 
 class LinearMessageUpdate(nn.Module):
     """
     A layer that combines a graph embedding with a message by applying a linear transformation and summing them.
     """
-    def __init__(self, num_features: int, activation_func: _tensor_func = None, use_weights: bool = True, use_bias: bool = True):
+    def __init__(self, in_graph_features: int, in_msg_features: int, out_features: int,
+                 activation_func: _tensor_func = None, use_bias: bool = False):
         super().__init__()
         if activation_func is None:
             activation_func = lambda x: x
         self.activate = activation_func
-        self.d = num_features
 
-        r = math.sqrt(1.0 / self.d)
+        self.g_layer = lambda g: 0
+        if in_graph_features != 0:
+            self.g_layer = nn.Linear(in_graph_features, out_features, bias=use_bias)
 
-        self.use_weights = use_weights
-        if use_weights:
-            self.W1 = nn.Parameter(torch.rand((self.d, self.d)) * -2.0 * r + r)
-            self.W2 = nn.Parameter(torch.rand((self.d, self.d)) * -2.0 * r + r)
-
-        self.use_bias = use_bias
-        if use_bias:
-            self.B = nn.Parameter(torch.rand(self.d) * -2.0 * r + r)
+        self.m_layer = nn.Linear(in_msg_features, out_features, bias=use_bias)
 
     def forward(self, graph: Tensor, message: Tensor) -> Tensor:
         """
@@ -286,14 +322,35 @@ class LinearMessageUpdate(nn.Module):
             A new (n, d) tensor representing final graph embeddings
 
         """
-        if self.use_weights and self.use_bias:
-            return self.activate(graph @ self.W1 + message @ self.W2 + self.B)
-        elif self.use_weights:
-            return self.activate(graph @ self.W1 + message @ self.W2)
-        elif self.use_bias:
-            return self.activate(graph + message + self.B)
-        else:
-            return self.activate(graph + message)
+        return self.activate(self.g_layer(graph) + self.m_layer(message))
+
+
+class AdjacencyScale(nn.Module):
+    def __init__(self, num_matrices: int, num_nodes: int, pre_weight: bool = True, post_weight: bool = True):
+        super().__init__()
+        self.A = num_matrices
+
+        r = math.sqrt(1.0 / num_nodes)
+        self.pre = None
+        if pre_weight:
+            self.pre = nn.Parameter(torch.stack([torch.eye(num_nodes) * r for _ in range(self.A)]))
+        self.post = None
+        if post_weight:
+            self.post = nn.Parameter(torch.stack([torch.eye(num_nodes) * r for _ in range(self.A)]))
+
+    def forward(self, adj: Tensor) -> Tensor:
+        if self.pre is None and self.post is None:
+            return adj
+        outputs = []
+        for i in range(self.A):
+            if self.pre is not None and self.post is not None:
+                outputs.append(self.pre[i] @ adj[i] @ self.post[i])
+            elif self.pre is not None:
+                outputs.append(self.pre[i] @ adj[i])
+            elif self.post is not None:
+                outputs.append(adj[i] @ self.post[i])
+
+        return torch.stack(outputs)
 
 class EmbeddingGenerator(nn.Module):
     """

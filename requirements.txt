@@ -1,4 +1,0 @@
-numpy==1.24.1
-pyunionfind==1.0.0
-torch==1.13.1
-tqdm==4.64.1
